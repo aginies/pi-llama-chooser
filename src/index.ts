@@ -704,61 +704,83 @@ async function showServerMenu(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
+	const name = await promptServerName(ctx);
+	if (name === undefined) return;
+	const host = await promptServerHost(ctx);
+	if (host === undefined) return;
+	const port = await promptServerPort(ctx);
+	if (port === undefined) return;
+	const protocol = await promptServerProtocol(ctx);
+	if (protocol === undefined) return;
+	const apiKey = await promptServerApiKey(ctx);
+	if (apiKey === undefined) return;
+
+	// Final gate: validate the complete server before persisting.
+	const finalCheck = validateServerArgs(name, host, String(port), protocol, apiKey);
+	if (finalCheck.error) {
+		ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
+		return;
+	}
+
+	const servers = loadServers();
+	servers.push({ name, host, port, protocol, apiKey, enabled: true });
+	saveServers(servers);
+	ctx.ui.notify(`Added server "${name}" at ${getInferenceUrl({ host, port, protocol })}`, "info");
+}
+
+async function promptServerName(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	for (;;) {
-		const nameRaw = await ctx.ui.input("Server name (e.g. aginies.guibland.com)");
-		if (nameRaw === undefined) return;
-		const name = nameRaw.trim();
-		const nameError = validateName(name);
-		if (nameError) {
-			ctx.ui.notify(nameError, "error");
+		const raw = await ctx.ui.input("Server name (e.g. aginies.guibland.com)");
+		if (raw === undefined) return undefined;
+		const name = raw.trim();
+		const error = validateName(name);
+		if (error) {
+			ctx.ui.notify(error, "error");
 			continue;
 		}
 		if (findServer(name)) {
 			ctx.ui.notify(`Server "${name}" already exists.`, "error");
 			continue;
 		}
-
-		const hostRaw = await ctx.ui.input("Host — IP or hostname (e.g. 192.168.1.50)");
-		if (hostRaw === undefined) return;
-		const hostError = validateHost(hostRaw);
-		if (hostError) {
-			ctx.ui.notify(hostError, "error");
-			continue;
-		}
-		const host = hostRaw.trim();
-
-		const portRaw = await ctx.ui.input("Port (1-65535, e.g. 8080)");
-		if (portRaw === undefined) return;
-		const portResult = validatePort(portRaw);
-		const port = portResult.port;
-		if (portResult.error || port === undefined) {
-			ctx.ui.notify(portResult.error ?? "Invalid port.", "error");
-			continue;
-		}
-
-		const protocol = (await ctx.ui.select("Protocol", ["http", "https"])) as
-			| "http"
-			| "https"
-			| undefined;
-		if (protocol === undefined) return;
-
-		const keyRaw = await ctx.ui.input("API key (optional — Enter to skip)");
-		if (keyRaw === undefined) return;
-		const apiKey = keyRaw.trim() || undefined;
-
-		// Final gate: validate the complete server before persisting.
-		const finalCheck = validateServerArgs(name, host, String(port), protocol, apiKey);
-		if (finalCheck.error) {
-			ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
-			continue;
-		}
-
-		const servers = loadServers();
-		servers.push({ name, host, port, protocol, apiKey, enabled: true });
-		saveServers(servers);
-		ctx.ui.notify(`Added server "${name}" at ${getInferenceUrl({ host, port, protocol })}`, "info");
-		return;
+		return name;
 	}
+}
+
+async function promptServerHost(ctx: ExtensionCommandContext): Promise<string | undefined> {
+	for (;;) {
+		const raw = await ctx.ui.input("Host — IP or hostname (e.g. 192.168.1.50)");
+		if (raw === undefined) return undefined;
+		const error = validateHost(raw);
+		if (error) {
+			ctx.ui.notify(error, "error");
+			continue;
+		}
+		return raw.trim();
+	}
+}
+
+async function promptServerPort(ctx: ExtensionCommandContext): Promise<number | undefined> {
+	for (;;) {
+		const raw = await ctx.ui.input("Port (1-65535, e.g. 8080)");
+		if (raw === undefined) return undefined;
+		const result = validatePort(raw);
+		if (result.error || result.port === undefined) {
+			ctx.ui.notify(result.error ?? "Invalid port.", "error");
+			continue;
+		}
+		return result.port;
+	}
+}
+
+async function promptServerProtocol(ctx: ExtensionCommandContext): Promise<"http" | "https" | undefined> {
+	const choice = await ctx.ui.select("Protocol", ["http", "https"]);
+	return choice as "http" | "https" | undefined;
+}
+
+async function promptServerApiKey(ctx: ExtensionCommandContext): Promise<string | undefined> {
+	const raw = await ctx.ui.input("API key (optional — Enter to skip)");
+	if (raw === undefined) return undefined;
+	return raw.trim() || undefined;
 }
 
 async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
@@ -815,64 +837,80 @@ async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServe
 }
 
 async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
-	for (;;) {
-		const hostRaw = await ctx.ui.input(`Host — current: ${server.host} (Enter to keep)`);
-		if (hostRaw === undefined) return;
-		let host = server.host;
-		if (hostRaw.trim() !== "") {
-			const hostError = validateHost(hostRaw);
-			if (hostError) {
-				ctx.ui.notify(hostError, "error");
-				continue;
-			}
-			host = hostRaw.trim();
-		}
+	const host = await promptEditHost(ctx, server);
+	if (host === undefined) return;
+	const port = await promptEditPort(ctx, server);
+	if (port === undefined) return;
+	const protocol = await promptEditProtocol(ctx, server);
+	if (protocol === undefined) return;
+	const apiKey = await promptEditApiKey(ctx, server);
+	if (apiKey === undefined) return;
 
-		const portRaw = await ctx.ui.input(`Port — current: ${server.port} (Enter to keep)`);
-		if (portRaw === undefined) return;
-		let port = server.port;
-		if (portRaw.trim() !== "") {
-			const portResult = validatePort(portRaw);
-			const newPort = portResult.port;
-			if (portResult.error || newPort === undefined) {
-				ctx.ui.notify(portResult.error ?? "Invalid port.", "error");
-				continue;
-			}
-			port = newPort;
-		}
-
-		const protocol = (await ctx.ui.select(`Protocol — current: ${server.protocol}`, [
-			server.protocol,
-			server.protocol === "http" ? "https" : "http",
-		])) as "http" | "https" | undefined;
-		if (protocol === undefined) return;
-
-		const keyRaw = await ctx.ui.input(
-			`API key — current: ${server.apiKey ? "set" : "none"} (Enter to keep)`,
-		);
-		if (keyRaw === undefined) return;
-		const apiKey = keyRaw.trim() !== "" ? keyRaw.trim() : server.apiKey;
-
-		// Final gate: validate the complete server before persisting.
-		const finalCheck = validateServerArgs(server.name, host, String(port), protocol, apiKey);
-		if (finalCheck.error) {
-			ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
-			continue;
-		}
-
-		const error = mutateServer(server.name, (s) => {
-			s.host = host;
-			s.port = port;
-			s.protocol = protocol;
-			s.apiKey = apiKey;
-		});
-		if (error) {
-			ctx.ui.notify(error, "error");
-			return;
-		}
-		ctx.ui.notify(`Updated server "${server.name}" to ${getInferenceUrl({ host, port, protocol })}`, "info");
+	// Final gate: validate the complete server before persisting.
+	const finalCheck = validateServerArgs(server.name, host, String(port), protocol, apiKey);
+	if (finalCheck.error) {
+		ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
 		return;
 	}
+
+	const error = mutateServer(server.name, (s) => {
+		s.host = host;
+		s.port = port;
+		s.protocol = protocol;
+		s.apiKey = apiKey;
+	});
+	if (error) {
+		ctx.ui.notify(error, "error");
+		return;
+	}
+	ctx.ui.notify(`Updated server "${server.name}" to ${getInferenceUrl({ host, port, protocol })}`, "info");
+}
+
+async function promptEditHost(ctx: ExtensionCommandContext, server: LlamaServer): Promise<string | undefined> {
+	for (;;) {
+		const raw = await ctx.ui.input(`Host — current: ${server.host} (Enter to keep)`);
+		if (raw === undefined) return undefined;
+		if (raw.trim() === "") return server.host;
+		const error = validateHost(raw);
+		if (error) {
+			ctx.ui.notify(error, "error");
+			continue;
+		}
+		return raw.trim();
+	}
+}
+
+async function promptEditPort(ctx: ExtensionCommandContext, server: LlamaServer): Promise<number | undefined> {
+	for (;;) {
+		const raw = await ctx.ui.input(`Port — current: ${server.port} (Enter to keep)`);
+		if (raw === undefined) return undefined;
+		if (raw.trim() === "") return server.port;
+		const result = validatePort(raw);
+		if (result.error || result.port === undefined) {
+			ctx.ui.notify(result.error ?? "Invalid port.", "error");
+			continue;
+		}
+		return result.port;
+	}
+}
+
+async function promptEditProtocol(
+	ctx: ExtensionCommandContext,
+	server: LlamaServer,
+): Promise<"http" | "https" | undefined> {
+	const choice = await ctx.ui.select(`Protocol — current: ${server.protocol}`, [
+		server.protocol,
+		server.protocol === "http" ? "https" : "http",
+	]);
+	return choice as "http" | "https" | undefined;
+}
+
+async function promptEditApiKey(ctx: ExtensionCommandContext, server: LlamaServer): Promise<string | undefined> {
+	const raw = await ctx.ui.input(
+		`API key — current: ${server.apiKey ? "set" : "none"} (Enter to keep)`,
+	);
+	if (raw === undefined) return undefined;
+	return raw.trim() !== "" ? raw.trim() : server.apiKey;
 }
 
 async function refreshOneServer(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
