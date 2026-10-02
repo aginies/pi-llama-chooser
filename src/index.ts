@@ -388,27 +388,38 @@ function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
  * candidate server. Falls back to the first server if none are reachable.
  * Returns undefined when the id format is unrecognised.
  *
+ * Supports both the new deduplicated format ("<basename>@<server1>|<server2>")
+ * and the legacy format ("<server> :: <model>").
+ *
  * Uses the synchronous ping cache (30s TTL). If stale, falls back to the
  * first server — the next stream will re-ping and update the cache.
  */
 function serverForModelId(modelId: string): LlamaServer | undefined {
-	// New deduplicated format: "<basename>@<server1>|<server2>|..."
+	// Try new deduplicated format first: "<basename>@<server1>|<server2>|..."
 	const atIdx = modelId.lastIndexOf("@");
-	if (atIdx <= 0) return undefined;
-	const rawServers = modelId.slice(atIdx + 1).split("|");
-	const servers: LlamaServer[] = [];
-	for (const name of rawServers) {
-		const s = findServer(name.trim());
-		if (s) servers.push(s);
+	if (atIdx > 0) {
+		const rawServers = modelId.slice(atIdx + 1).split("|");
+		const servers: LlamaServer[] = [];
+		for (const name of rawServers) {
+			const s = findServer(name.trim());
+			if (s) servers.push(s);
+		}
+		if (servers.length > 0) {
+			// Return the first online server (from cache); fall back to the first one.
+			for (const s of servers) {
+				const key = `${s.host}:${s.port}`;
+				const cached = pingCache.get(key);
+				if (cached && cached.online) return s;
+			}
+			return servers[0];
+		}
 	}
-	if (servers.length === 0) return undefined;
-	// Return the first online server (from cache); fall back to the first one.
-	for (const s of servers) {
-		const key = `${s.host}:${s.port}`;
-		const cached = pingCache.get(key);
-		if (cached && cached.online) return s;
+	// Fall back to legacy format: "<server> :: <model>"
+	const sep = modelId.indexOf(SERVER_SEP);
+	if (sep > 0) {
+		return loadServers().find((s) => s.name === modelId.slice(0, sep).trim());
 	}
-	return servers[0];
+	return undefined;
 }
 
 /**
