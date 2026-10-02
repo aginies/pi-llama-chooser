@@ -95,6 +95,8 @@ const FETCH_TIMEOUT_MS = 10_000;
 const MODEL_CACHE_TTL = 60_000;
 /** Cache TTL for ping results (30s). */
 const PING_CACHE_TTL = 30_000;
+/** Separator used in model IDs to link a model back to its server. */
+const SERVER_SEP = " :: ";
 
 // =============================================================================
 // Cached state
@@ -265,7 +267,7 @@ function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelCon
 	const ctxSize = model.meta?.n_ctx;
 	const displayName = quant ? `${name} (${quant})` : name;
 	return {
-		id: `${server.name} (${name})`,
+		id: `${server.name}${SERVER_SEP}${name}`,
 		name: `${server.name} / ${displayName}`,
 		api: "openai-completions",
 		baseUrl: getInferenceUrl(server),
@@ -333,7 +335,7 @@ async function refreshModels(context: {
 }
 
 function serverForModelId(modelId: string): LlamaServer | undefined {
-	const sep = modelId.indexOf(' (');
+	const sep = modelId.indexOf(SERVER_SEP);
 	if (sep <= 0) return undefined;
 	return loadServers().find((s) => s.name === modelId.slice(0, sep));
 }
