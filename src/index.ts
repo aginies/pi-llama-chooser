@@ -86,6 +86,9 @@ interface LlamaModel {
 	};
 }
 
+/** Pre-compiled regex for GGUF quantization extraction. */
+const QUANT_RE = /(Q[0-9]_[A-Z_]+|IQ[0-9]_[A-Z_0-9]+|F[0-9]+[BE]?)/;
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -262,8 +265,7 @@ export function basename(s: string): string {
  * Falls back to null if no quantization pattern is found.
  */
 export function extractQuant(modelId: string): string | null {
-	// Common GGUF quantization patterns: Q4_K_M, Q8_0, Q6_K, IQ2_XXS, etc.
-	const match = modelId.match(/(Q[0-9]_[A-Z_]+|IQ[0-9]_[A-Z_0-9]+|F[0-9]+[BE]?)/);
+	const match = modelId.match(QUANT_RE);
 	return match ? match[1] : null;
 }
 
@@ -315,16 +317,26 @@ export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderM
 }
 
 async function collectModelConfigs(signal?: AbortSignal): Promise<ProviderModelConfig[]> {
-	const configs: ProviderModelConfig[] = [];
-	for (const server of loadServers().filter((s) => s.enabled)) {
-		if (signal?.aborted) break;
-		try {
-			for (const model of await fetchModels(server, signal)) {
-				configs.push(toModelConfig(server, model));
+	const enabled = loadServers().filter((s) => s.enabled);
+	if (enabled.length === 0) return [];
+
+	// Parallel fetch across all enabled servers (skip failures, preserve current semantics).
+	const results = await Promise.allSettled(
+		enabled.map(async (server) => {
+			if (signal?.aborted) return null;
+			try {
+				const models = await fetchModels(server, signal);
+				return models.map((m) => toModelConfig(server, m));
+			} catch {
+				// Skip unavailable servers; retried on next refresh.
+				return null;
 			}
-		} catch {
-			// Skip unavailable servers; retried on next refresh.
-		}
+		}),
+	);
+
+	const configs: ProviderModelConfig[] = [];
+	for (const r of results) {
+		if (r.status === 'fulfilled' && r.value) configs.push(...r.value);
 	}
 	return dedupConfigs(configs);
 }
@@ -371,26 +383,28 @@ async function refreshModels(context: {
  * and routing tries each server in order until one is online.
  */
 export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
-	const byBasename = new Map<string, ProviderModelConfig[]>();
+	const byBasename = new Map<string, { cfg: ProviderModelConfig; serverName: string }[]>();
 	for (const cfg of configs) {
-		const basename = cfg.name.split("/").pop() ?? cfg.name;
+		const slashIdx = cfg.name.lastIndexOf("/");
+		const basename = slashIdx >= 0 ? cfg.name.slice(slashIdx + 1) : cfg.name;
+		const serverName = slashIdx >= 0 ? cfg.name.slice(0, slashIdx).trim() : cfg.name;
 		const entry = byBasename.get(basename);
 		if (entry) {
-			entry.push(cfg);
+			entry.push({ cfg, serverName });
 		} else {
-			byBasename.set(basename, [cfg]);
+			byBasename.set(basename, [{ cfg, serverName }]);
 		}
 	}
 
 	const deduped: ProviderModelConfig[] = [];
 	for (const [, group] of byBasename) {
 		if (group.length === 1) {
-			deduped.push(group[0]);
+			deduped.push(group[0].cfg);
 			continue;
 		}
 		// Merge: first config becomes canonical, server list appended.
-		const first = group[0];
-		const serverNames = group.map((c) => c.name.split("/")[0]).filter(Boolean);
+		const first = group[0].cfg;
+		const serverNames = group.map((g) => g.serverName).filter(Boolean);
 		const id = `${basename}@${serverNames.join("|")}`;
 		const name = `${basename} (${serverNames.join(", ")})`;
 		const merged = { ...first, id, name };
@@ -586,9 +600,9 @@ Run /llama-chooser config with no arguments to open the interactive menu.
 CLI subcommands:${SUBCOMMANDS_LIST}`;
 
 async function configList(ui: Ui): Promise<void> {
-	const servers = loadServers();
+	const servers = loadServers().filter((s) => s.enabled);
 	if (servers.length === 0) {
-		ui.notify("No servers configured. Use /llama-chooser config add to add one.", "info");
+		ui.notify("No enabled servers configured. Use /llama-chooser config add to add one.", "info");
 		return;
 	}
 	const reachable = await Promise.all(servers.map((s) => pingServer(s)));
@@ -962,7 +976,7 @@ async function promptEditApiKey(ctx: ExtensionCommandContext, server: LlamaServe
 
 async function refreshOneServer(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
 	try {
-		const models = await fetchModels(server);
+		const models = await fetchModels(server, undefined, true);
 		ctx.ui.notify(`${server.name}: ${models.length} model(s) available.`, "info");
 	} catch (error) {
 		ctx.ui.notify(`Could not reach ${server.name}: ${errorMessage(error)}`, "error");

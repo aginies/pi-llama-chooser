@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Parallel model fetching** — `collectModelConfigs` now fetches from all
+  enabled servers simultaneously via `Promise.allSettled` instead of
+  sequentially. Model refresh latency drops from N×latency to ~1×latency.
+- **Pre-compiled quantization regex** — `extractQuant` now uses a module-level
+  `const QUANT_RE` instead of compiling the regex on every call.
+- **Filter disabled servers in `config list`** — only pings enabled servers
+  instead of all configured servers, avoiding unnecessary HTTP requests.
+- **Force-refresh in server detail** — the "Refresh models" button in the
+  server detail menu now bypasses the 60s model cache, returning fresh data
+  as the user expects.
+- **Single split in `dedupConfigs`** — replaced two `split("/")` calls per
+  config (basename + server name) with a single `lastIndexOf` + `slice`,
+  storing both values in the Map entry to avoid recomputation.
+
 ## [0.3.3] — 2025-10-02
 
 ### Added
