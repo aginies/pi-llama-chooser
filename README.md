@@ -4,9 +4,15 @@ Pi extension: manage remote llama.cpp servers and use their models via `/model`.
 
 ## Installation
 
-Install as a Pi extension:
+Install from Pi:
 
 ```
+pi install npm:pi-llama-chooser
+```
+
+Or directly with npm:
+
+```bash
 npm install pi-llama-chooser
 ```
 
