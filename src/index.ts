@@ -306,7 +306,7 @@ async function collectModelConfigs(signal?: AbortSignal): Promise<ProviderModelC
 			// Skip unavailable servers; retried on next refresh.
 		}
 	}
-	return configs;
+	return dedupConfigs(configs);
 }
 
 // =============================================================================
@@ -345,10 +345,70 @@ async function refreshModels(context: {
 	return cachedConfigs;
 }
 
+/**
+ * Deduplicate model configs: identical basenames across servers are merged
+ * into a single entry. The model id becomes "<basename>@<server1>|<server2>"
+ * and routing tries each server in order until one is online.
+ */
+function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
+	const byBasename = new Map<string, ProviderModelConfig[]>();
+	for (const cfg of configs) {
+		const basename = cfg.name.split("/").pop() ?? cfg.name;
+		const entry = byBasename.get(basename);
+		if (entry) {
+			entry.push(cfg);
+		} else {
+			byBasename.set(basename, [cfg]);
+		}
+	}
+
+	const deduped: ProviderModelConfig[] = [];
+	for (const [, group] of byBasename) {
+		if (group.length === 1) {
+			deduped.push(group[0]);
+			continue;
+		}
+		// Merge: first config becomes canonical, server list appended.
+		const first = group[0];
+		const serverNames = group.map((c) => c.name.split("/")[0]).filter(Boolean);
+		const id = `${basename}@${serverNames.join("|")}`;
+		const name = `${basename} (${serverNames.join(", ")})`;
+		const merged = { ...first, id, name };
+		// Attach candidate servers for routing (not part of ProviderModelConfig).
+		(merged as ProviderModelConfig & { _servers: LlamaServer[] })._servers = serverNames
+			.map((n) => findServer(n))
+			.filter(Boolean) as LlamaServer[];
+		deduped.push(merged);
+	}
+	return deduped;
+}
+
+/**
+ * Parse a (possibly deduplicated) model id and return the first online
+ * candidate server. Falls back to the first server if none are reachable.
+ * Returns undefined when the id format is unrecognised.
+ *
+ * Uses the synchronous ping cache (30s TTL). If stale, falls back to the
+ * first server — the next stream will re-ping and update the cache.
+ */
 function serverForModelId(modelId: string): LlamaServer | undefined {
-	const sep = modelId.indexOf(SERVER_SEP);
-	if (sep <= 0) return undefined;
-	return loadServers().find((s) => s.name === modelId.slice(0, sep));
+	// New deduplicated format: "<basename>@<server1>|<server2>|..."
+	const atIdx = modelId.lastIndexOf("@");
+	if (atIdx <= 0) return undefined;
+	const rawServers = modelId.slice(atIdx + 1).split("|");
+	const servers: LlamaServer[] = [];
+	for (const name of rawServers) {
+		const s = findServer(name.trim());
+		if (s) servers.push(s);
+	}
+	if (servers.length === 0) return undefined;
+	// Return the first online server (from cache); fall back to the first one.
+	for (const s of servers) {
+		const key = `${s.host}:${s.port}`;
+		const cached = pingCache.get(key);
+		if (cached && cached.online) return s;
+	}
+	return servers[0];
 }
 
 /**
