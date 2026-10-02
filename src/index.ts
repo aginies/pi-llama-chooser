@@ -1062,7 +1062,8 @@ async function handleList(rest: string[], ui: Ui): Promise<void> {
 					const cols: string[] = [];
 					const baseName = basename(m.id);
 					const quant = m.meta?.ftype;
-					const ctx = m.meta?.n_ctx;
+					// Gufo: context_length at top level; llama.cpp: n_ctx in meta.
+					const ctx = m.context_length ?? m.meta?.n_ctx;
 					const size = m.meta?.size;
 
 					cols.push(baseName);
