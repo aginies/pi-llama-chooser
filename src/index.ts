@@ -98,7 +98,7 @@ const MODEL_CACHE_TTL = 60_000;
 /** Cache TTL for ping results (30s). */
 const PING_CACHE_TTL = 30_000;
 /** Separator used in model IDs to link a model back to its server. */
-const SERVER_SEP = " :: ";
+const SERVER_SEP = " / ";
 
 // =============================================================================
 // Cached state
@@ -248,7 +248,8 @@ async function fetchModels(
 // =============================================================================
 
 function basename(s: string): string {
-	return s.split(/[\\/]/).pop() ?? s;
+	const base = s.split(/[\\/]/).pop() ?? s;
+	return base.replace(/\.(gguf|bin|pt|pth|safetensors)$/i, "");
 }
 
 /** Format context size for display: 32768 → "32K", 524288 → "512K". */
@@ -276,7 +277,7 @@ function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelCon
 	const ctxSize = model.meta?.n_ctx;
 	const displayName = quant ? `${name} (${quant})` : name;
 	return {
-		id: `${server.name}${SERVER_SEP}${name}`,
+		id: `${server.name}${SERVER_SEP}${displayName}`,
 		name: `${server.name} / ${displayName}`,
 		api: "openai-completions",
 		baseUrl: getInferenceUrl(server),
@@ -391,7 +392,7 @@ function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
  * Returns undefined when the id format is unrecognised.
  *
  * Supports both the new deduplicated format ("<basename>@<server1>|<server2>")
- * and the legacy format ("<server> :: <model>").
+ * and the legacy format ("<server> / <model>").
  *
  * Uses the synchronous ping cache (30s TTL). If stale, falls back to the
  * first server — the next stream will re-ping and update the cache.
