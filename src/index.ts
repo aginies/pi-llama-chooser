@@ -738,7 +738,10 @@ async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
 	const protocol = await promptServerProtocol(ctx);
 	if (protocol === undefined) return;
 	const apiKey = await promptServerApiKey(ctx);
-	if (apiKey === undefined) return;
+	if (apiKey === undefined) {
+		// User cancelled the wizard entirely.
+		return;
+	}
 
 	// Final gate: validate the complete server before persisting.
 	const finalCheck = validateServerArgs(name, host, String(port), protocol, apiKey);
@@ -805,7 +808,7 @@ async function promptServerProtocol(ctx: ExtensionCommandContext): Promise<"http
 async function promptServerApiKey(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	const raw = await ctx.ui.input("API key (optional — Enter to skip)");
 	if (raw === undefined) return undefined;
-	return raw.trim() || undefined;
+	return raw.trim() || "";
 }
 
 async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
@@ -870,7 +873,10 @@ async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServe
 	const protocol = await promptEditProtocol(ctx, server);
 	if (protocol === undefined) return;
 	const apiKey = await promptEditApiKey(ctx, server);
-	if (apiKey === undefined) return;
+	if (apiKey === undefined) {
+		// User cancelled the wizard entirely.
+		return;
+	}
 
 	// Final gate: validate the complete server before persisting.
 	const finalCheck = validateServerArgs(server.name, host, String(port), protocol, apiKey);
