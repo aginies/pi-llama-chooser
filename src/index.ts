@@ -64,6 +64,8 @@ interface LlamaServer {
 	enabled: boolean;
 	/** Optional API key sent as `Authorization: Bearer <key>` for this server. */
 	apiKey?: string;
+	/** Override context window for all models on this server (0 = use model default). */
+	contextOverride?: number;
 }
 
 interface LlamaModel {
@@ -280,8 +282,8 @@ function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelCon
 		baseUrl: getInferenceUrl(server),
 		input: ["text"],
 		reasoning: false,
-		contextWindow: ctxSize ?? DEFAULT_CONTEXT_WINDOW,
-		maxTokens: ctxSize ?? DEFAULT_MAX_TOKENS,
+		contextWindow: server.contextOverride ?? ctxSize ?? DEFAULT_CONTEXT_WINDOW,
+		maxTokens: server.contextOverride ?? ctxSize ?? DEFAULT_MAX_TOKENS,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		compat: {
 			supportsStore: false,
@@ -540,7 +542,9 @@ const SUBCOMMANDS_LIST = `
   remove <name>                             Remove a server
   enable <name>                             Enable a server
   disable <name>                            Disable a server
-  refresh                                   Refresh the model list`;
+  refresh                                   Refresh the model list
+  set-ctx <name> <ctx>                      Set context window override (0 = default)
+  clear-ctx <name>                          Clear context window override`;
 
 const USAGE = `Llama Chooser
 
@@ -795,7 +799,8 @@ async function promptServerApiKey(ctx: ExtensionCommandContext): Promise<string 
 }
 
 async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
-	for (;;) {
+	let running = true;
+	while (running) {
 		const info = [
 			`Name:     ${server.name}`,
 			`Host:     ${server.host}`,
@@ -803,7 +808,7 @@ async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServe
 			`Protocol: ${server.protocol}`,
 			`API key:  ${server.apiKey ? "set" : "none"}`,
 			`URL:      ${getInferenceUrl(server)}`,
-			`Status:   ${server.enabled ? "enabled" : "disabled"}`,
+			`Ctx size: ${server.contextOverride ? formatCtxSize(server.contextOverride) : "default"}`,
 		].join("\n");
 		const options = [
 			EDIT_OPTION,
@@ -933,6 +938,46 @@ async function refreshOneServer(ctx: ExtensionCommandContext, server: LlamaServe
 	}
 }
 
+function configSetContextOverride(rest: string[], ui: Ui): void {
+	if (rest.length < 2) {
+		ui.notify("Usage: /llama-chooser config set-ctx <name> <ctx>", "info");
+		return;
+	}
+	const [name, ctxStr] = rest;
+	const ctx = Number(ctxStr);
+	if (!Number.isInteger(ctx) || ctx < 0) {
+		ui.notify("Context window must be a non-negative integer.", "error");
+		return;
+	}
+	const error = mutateServer(name, (s) => {
+		s.contextOverride = ctx > 0 ? ctx : undefined;
+	});
+	if (error) {
+		ui.notify(error, "error");
+		return;
+	}
+	ui.notify(ctx > 0
+		? `Set context window for "${name}" to ${formatCtxSize(ctx)}.`
+		: `Cleared context window override for "${name}".`,
+		"info",
+	);
+}
+
+function configClearContextOverride(rest: string[], ui: Ui): void {
+	if (rest.length < 1) {
+		ui.notify("Usage: /llama-chooser config clear-ctx <name>", "info");
+		return;
+	}
+	const error = mutateServer(rest[0], (s) => {
+		s.contextOverride = undefined;
+	});
+	if (error) {
+		ui.notify(error, "error");
+		return;
+	}
+	ui.notify(`Cleared context window override for "${rest[0]}".`, "info");
+}
+
 // =============================================================================
 // Command handlers
 // =============================================================================
@@ -961,6 +1006,12 @@ async function handleConfigCli(rest: string[], ui: Ui): Promise<void> {
 			return;
 		case "refresh":
 			await configRefresh(ui);
+			return;
+		case "set-ctx":
+			configSetContextOverride(rest, ui);
+			return;
+		case "clear-ctx":
+			configClearContextOverride(rest, ui);
 			return;
 		default:
 			ui.notify(CONFIG_USAGE, "info");
