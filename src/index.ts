@@ -89,7 +89,9 @@ interface LlamaModel {
 // =============================================================================
 
 const PROVIDER_ID = "llama-chooser";
-const STORAGE_PATH = path.join(os.homedir(), ".pi", "agent", "llama-chooser-servers.json");
+const STORAGE_PATH =
+	process.env.LLAMA_CHOOSER_STORAGE ??
+	path.join(os.homedir(), ".pi", "agent", "llama-chooser-servers.json");
 const DEFAULT_CONTEXT_WINDOW = 32_768;
 const DEFAULT_MAX_TOKENS = 4_096;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -771,7 +773,7 @@ async function promptServerName(ctx: ExtensionCommandContext): Promise<string | 
 
 async function promptServerHost(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	for (;;) {
-		const raw = await ctx.ui.input("Host — IP or hostname (e.g. 192.168.1.50)");
+		const raw = await ctx.ui.input("Host — IP address or hostname (e.g. 192.168.1.50 or myserver.local)");
 		if (raw === undefined) return undefined;
 		const error = validateHost(raw);
 		if (error) {
@@ -892,7 +894,7 @@ async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServe
 
 async function promptEditHost(ctx: ExtensionCommandContext, server: LlamaServer): Promise<string | undefined> {
 	for (;;) {
-		const raw = await ctx.ui.input(`Host — current: ${server.host} (Enter to keep)`);
+		const raw = await ctx.ui.input(`Host — current: ${server.host} (Enter to keep; IP or hostname)`);
 		if (raw === undefined) return undefined;
 		if (raw.trim() === "") return server.host;
 		const error = validateHost(raw);

@@ -7,7 +7,14 @@ import type { LlamaServer, LlamaModel, ProviderModelConfig } from "../src/index"
 // Helpers
 // ---------------------------------------------------------------------------
 
-const STORAGE_PATH = join(process.env.HOME ?? "/tmp", ".pi", "agent", "llama-chooser-servers.json");
+// Use a test-only storage path to avoid clobbering the real config at
+// ~/.pi/agent/llama-chooser-servers.json.
+process.env.LLAMA_CHOOSER_STORAGE = join(
+	process.env.HOME ?? "/tmp",
+	".pi",
+	"agent",
+	"llama-chooser-test-servers.json",
+);
 
 // Dynamic import to avoid ESM/CJS issues
 let mod: typeof import("../src/index");
@@ -19,17 +26,21 @@ async function loadModule() {
 	return mod;
 }
 
+function testStoragePath(): string {
+	return process.env.LLAMA_CHOOSER_STORAGE!;
+}
+
 function setupTestStorage(servers: any[]) {
-	const dir = join(STORAGE_PATH, "..");
+	const dir = join(testStoragePath(), "..");
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true });
 	}
-	writeFileSync(STORAGE_PATH, JSON.stringify(servers, null, 2), "utf-8");
+	writeFileSync(testStoragePath(), JSON.stringify(servers, null, 2), "utf-8");
 }
 
 function clearTestStorage() {
-	if (existsSync(STORAGE_PATH)) {
-		rmSync(STORAGE_PATH);
+	if (existsSync(testStoragePath())) {
+		rmSync(testStoragePath());
 	}
 }
 

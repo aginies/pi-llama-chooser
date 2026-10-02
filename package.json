@@ -1,6 +1,6 @@
 {
 	"name": "pi-llama-chooser",
-	"version": "0.3.3",
+	"version": "0.3.4",
 	"type": "module",
 	"description": "Pi extension: manage remote llama.cpp servers and use their models via /model",
 	"author": {
