@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] — 2025-10-02
+
+### Added
+
+- **Context window override** — set a custom context window per server via
+  `set-ctx` / `clear-ctx` CLI commands or the `contextOverride` config field.
+
+### Fixed
+
+- **Model display names** — changed separator from ` :: ` to ` / ` to match
+  the name field; quantization level now included in model id so it displays
+  correctly; stripped `.gguf`/`.bin`/`.pt`/`.pth`/`.safetensors` extensions.
+
 ## [0.3.2] — 2025-10-02
 
 ### Changed
