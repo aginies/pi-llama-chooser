@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2025-07-17
+
+### Fixed
+
+- **401 Unauthorized on legacy model IDs** — `serverForModelId` no longer
+  falls back to the old `server :: model` format after the dedup refactor.
+  Restored backward compatibility so non-deduplicated models route correctly.
+
 ## [0.2.0] — 2025-07-17
 
 ### Added
