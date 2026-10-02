@@ -125,7 +125,14 @@ function loadServers(): LlamaServer[] {
 		if (fs.existsSync(STORAGE_PATH)) {
 			const parsed = JSON.parse(fs.readFileSync(STORAGE_PATH, "utf-8"));
 			if (Array.isArray(parsed)) {
-				serversCache = parsed as LlamaServer[];
+				serversCache = parsed.filter((s): s is LlamaServer =>
+					typeof s === "object" &&
+					s !== null &&
+					typeof s.name === "string" &&
+					typeof s.host === "string" &&
+					typeof s.port === "number" &&
+					(s.protocol === "http" || s.protocol === "https"),
+				);
 				return serversCache;
 			}
 		}
@@ -307,10 +314,14 @@ async function collectModelConfigs(signal?: AbortSignal): Promise<ProviderModelC
 // =============================================================================
 
 /**
- * Last known-good model list. Pi calls refreshModels() with allowNetwork: false
- * during local (offline) refreshes — e.g. on every register/unregister — and
- * replaces the live catalog with whatever we return. Returning [] there would
- * wipe the catalog, so we return the cached list instead.
+ * Cached model configs returned by refreshModels.
+ *
+ * Pi calls refreshModels() with allowNetwork: false during local (offline)
+ * refreshes — e.g. on every register/unregister — and replaces the live
+ * catalog with whatever we return. Returning [] there would wipe the catalog,
+ * so we return the cached list instead. A live fetch that comes back empty
+ * (server down, no models) keeps the last known-good list so a transient
+ * failure never wipes the catalog.
  */
 let cachedConfigs: ProviderModelConfig[] = [];
 
