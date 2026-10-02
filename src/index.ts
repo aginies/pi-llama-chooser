@@ -256,6 +256,17 @@ export function basename(s: string): string {
 	return base.replace(/\.(gguf|bin|pt|pth|safetensors)$/i, "");
 }
 
+/**
+ * Extract quantization level from a model name/ID.
+ * Handles patterns like "Q4_K_M", "Q8_0", "Q6_K", "IQ2_XXS", etc.
+ * Falls back to null if no quantization pattern is found.
+ */
+export function extractQuant(modelId: string): string | null {
+	// Common GGUF quantization patterns: Q4_K_M, Q8_0, Q6_K, IQ2_XXS, etc.
+	const match = modelId.match(/(Q[0-9]_[A-Z_]+|IQ[0-9]_[A-Z_0-9]+|F[0-9]+[BE]?)/);
+	return match ? match[1] : null;
+}
+
 /** Format context size for display: 32768 → "32K", 524288 → "512K". */
 export function formatCtxSize(ctx: number): string {
 	if (ctx >= 1_000_000) return `${Math.round(ctx / 1_000_000)}M`;
@@ -277,7 +288,8 @@ export function formatFileSize(bytes: number): string {
 
 export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelConfig {
 	const name = basename(model.id);
-	const quant = model.meta?.ftype;
+	// meta.ftype from llama.cpp, or extract from model ID as fallback (Gufo).
+	const quant = model.meta?.ftype ?? extractQuant(model.id);
 	// Gufo puts context_length at top level; llama.cpp puts n_ctx inside meta.
 	const ctxSize = model.context_length ?? model.meta?.n_ctx;
 	const displayName = quant ? `${name} (${quant})` : name;
@@ -1061,7 +1073,8 @@ async function handleList(rest: string[], ui: Ui): Promise<void> {
 				const lines = models.map((m) => {
 					const cols: string[] = [];
 					const baseName = basename(m.id);
-					const quant = m.meta?.ftype;
+					// meta.ftype from llama.cpp, or extract from model ID as fallback (Gufo).
+					const quant = m.meta?.ftype ?? extractQuant(m.id);
 					// Gufo: context_length at top level; llama.cpp: n_ctx in meta.
 					const ctx = m.context_length ?? m.meta?.n_ctx;
 					const size = m.meta?.size;
