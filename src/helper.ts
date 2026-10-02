@@ -37,11 +37,20 @@ export function validateName(value: string): string | null {
 /**
  * Validate a host: an IPv4/IPv6 literal (via node:net) or a valid hostname.
  * Returns an error message, or null if valid.
+ *
+ * If the input contains only digits, dots, and colons it is treated as an IP
+ * and validated strictly — malformed IPs like "192.168.1" or "256.1.1.1" are
+ * rejected rather than falling through to hostname validation.
  */
 export function validateHost(value: string): string | null {
 	const host = value.trim();
 	if (!host) return "Host is required.";
 	if (/\s/.test(host)) return "Host must not contain spaces.";
+	// If it looks like an IP (digits, dots, colons only), enforce IP validation.
+	if (/^[0-9.:]+$/.test(host)) {
+		if (net.isIP(host) === 0) return "Host must be a valid IP address.";
+		return null;
+	}
 	if (net.isIP(host) !== 0) return null; // valid IPv4 or IPv6
 	if (HOSTNAME_RE.test(host)) return null; // valid hostname
 	return "Host must be a valid IP address or hostname.";
