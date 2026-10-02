@@ -121,7 +121,7 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function loadServers(): LlamaServer[] {
+export function loadServers(): LlamaServer[] {
 	if (serversCache !== null) return serversCache;
 	try {
 		if (fs.existsSync(STORAGE_PATH)) {
@@ -145,7 +145,7 @@ function loadServers(): LlamaServer[] {
 	return serversCache;
 }
 
-function saveServers(servers: LlamaServer[]): void {
+export function saveServers(servers: LlamaServer[]): void {
 	try {
 		const dir = path.dirname(STORAGE_PATH);
 		fs.mkdirSync(dir, { recursive: true });
@@ -161,11 +161,11 @@ function saveServers(servers: LlamaServer[]): void {
 	}
 }
 
-function findServer(name: string): LlamaServer | undefined {
+export function findServer(name: string): LlamaServer | undefined {
 	return loadServers().find((s) => s.name === name);
 }
 
-function mutateServer(name: string, mutate: (server: LlamaServer) => void): string | null {
+export function mutateServer(name: string, mutate: (server: LlamaServer) => void): string | null {
 	const servers = loadServers();
 	const index = servers.findIndex((s) => s.name === name);
 	if (index === -1) return `Server "${name}" not found.`;
@@ -174,7 +174,7 @@ function mutateServer(name: string, mutate: (server: LlamaServer) => void): stri
 	return null;
 }
 
-function removeServer(name: string): boolean {
+export function removeServer(name: string): boolean {
 	const servers = loadServers();
 	const index = servers.findIndex((s) => s.name === name);
 	if (index === -1) return false;
@@ -187,11 +187,11 @@ function removeServer(name: string): boolean {
 // Server URLs + HTTP
 // =============================================================================
 
-function getServerUrl(server: ServerEndpoint): string {
+export function getServerUrl(server: ServerEndpoint): string {
 	return `${server.protocol}://${server.host}:${server.port}`;
 }
 
-function getInferenceUrl(server: ServerEndpoint): string {
+export function getInferenceUrl(server: ServerEndpoint): string {
 	return `${getServerUrl(server)}/v1`;
 }
 
@@ -247,20 +247,20 @@ async function fetchModels(
 // Display helpers
 // =============================================================================
 
-function basename(s: string): string {
+export function basename(s: string): string {
 	const base = s.split(/[\\/]/).pop() ?? s;
 	return base.replace(/\.(gguf|bin|pt|pth|safetensors)$/i, "");
 }
 
 /** Format context size for display: 32768 → "32K", 524288 → "512K". */
-function formatCtxSize(ctx: number): string {
+export function formatCtxSize(ctx: number): string {
 	if (ctx >= 1_000_000) return `${Math.round(ctx / 1_000_000)}M`;
 	if (ctx >= 10_000) return `${Math.round(ctx / 1_000)}K`;
 	return String(ctx);
 }
 
 /** Format file size for display: 4294967296 → "4.0 GB". */
-function formatFileSize(bytes: number): string {
+export function formatFileSize(bytes: number): string {
 	if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
 	if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(0)} MB`;
 	if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(0)} KB`;
@@ -271,7 +271,7 @@ function formatFileSize(bytes: number): string {
 // Model configuration
 // =============================================================================
 
-function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelConfig {
+export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelConfig {
 	const name = basename(model.id);
 	const quant = model.meta?.ftype;
 	const ctxSize = model.meta?.n_ctx;
@@ -353,7 +353,7 @@ async function refreshModels(context: {
  * into a single entry. The model id becomes "<basename>@<server1>|<server2>"
  * and routing tries each server in order until one is online.
  */
-function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
+export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
 	const byBasename = new Map<string, ProviderModelConfig[]>();
 	for (const cfg of configs) {
 		const basename = cfg.name.split("/").pop() ?? cfg.name;
@@ -397,7 +397,7 @@ function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
  * Uses the synchronous ping cache (30s TTL). If stale, falls back to the
  * first server — the next stream will re-ping and update the cache.
  */
-function serverForModelId(modelId: string): LlamaServer | undefined {
+export function serverForModelId(modelId: string): LlamaServer | undefined {
 	// Try new deduplicated format first: "<basename>@<server1>|<server2>|..."
 	const atIdx = modelId.lastIndexOf("@");
 	if (atIdx > 0) {
@@ -417,12 +417,19 @@ function serverForModelId(modelId: string): LlamaServer | undefined {
 			return servers[0];
 		}
 	}
-	// Fall back to legacy format: "<server> :: <model>"
+	// Fall back to legacy format: "<server> / <model>"
 	const sep = modelId.indexOf(SERVER_SEP);
 	if (sep > 0) {
 		return loadServers().find((s) => s.name === modelId.slice(0, sep).trim());
 	}
 	return undefined;
+}
+
+/** Reset all in-memory caches (useful for testing). */
+export function resetCaches(): void {
+	serversCache = null;
+	modelCache.clear();
+	pingCache.clear();
 }
 
 /**
