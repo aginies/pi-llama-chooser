@@ -746,6 +746,13 @@ async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
 		if (keyRaw === undefined) return;
 		const apiKey = keyRaw.trim() || undefined;
 
+		// Final gate: validate the complete server before persisting.
+		const finalCheck = validateServerArgs(name, host, String(port), protocol, apiKey);
+		if (finalCheck.error) {
+			ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
+			continue;
+		}
+
 		const servers = loadServers();
 		servers.push({ name, host, port, protocol, apiKey, enabled: true });
 		saveServers(servers);
@@ -845,6 +852,13 @@ async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServe
 		);
 		if (keyRaw === undefined) return;
 		const apiKey = keyRaw.trim() !== "" ? keyRaw.trim() : server.apiKey;
+
+		// Final gate: validate the complete server before persisting.
+		const finalCheck = validateServerArgs(server.name, host, String(port), protocol, apiKey);
+		if (finalCheck.error) {
+			ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
+			continue;
+		}
 
 		const error = mutateServer(server.name, (s) => {
 			s.host = host;

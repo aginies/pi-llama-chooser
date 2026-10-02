@@ -57,15 +57,20 @@ export function validatePort(value: string): { error?: string; port?: number } {
 	return { port };
 }
 
-/** Validate a protocol. Returns the normalized protocol, or null if invalid. */
-export function validateProtocol(value: string | undefined): "http" | "https" | null {
-	const protocol = (value ?? "http").trim().toLowerCase();
+/**
+ * Validate a protocol. Returns the normalized protocol, or null if invalid
+ * or missing. Unlike the other validators this one does NOT default — the
+ * caller must supply an explicit value.
+ */
+export function validateProtocol(value: string): "http" | "https" | null {
+	const protocol = value.trim().toLowerCase();
 	return protocol === "http" || protocol === "https" ? protocol : null;
 }
 
 /**
  * Validate all server arguments at once (used by the `/llama-chooser config`
  * CLI subcommands). Returns { server } on success, or { error } on failure.
+ * All fields except apiKey are required.
  */
 export function validateServerArgs(
 	name: string,
@@ -83,8 +88,13 @@ export function validateServerArgs(
 	if (portResult.error || portResult.port === undefined) {
 		return { error: portResult.error ?? "Port is required." };
 	}
+	if (!protocol) {
+		return { error: "Protocol must be 'http' or 'https'." };
+	}
 	const parsedProtocol = validateProtocol(protocol);
-	if (parsedProtocol === null) return { error: "Protocol must be 'http' or 'https'." };
+	if (parsedProtocol === null) {
+		return { error: "Protocol must be 'http' or 'https'." };
+	}
 	const trimmedKey = (apiKey ?? "").trim();
 	return {
 		server: {
