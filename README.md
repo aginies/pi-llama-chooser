@@ -6,7 +6,7 @@ Pi extension: manage remote llama.cpp servers and use their models via `/model`.
 
 Install from Pi:
 
-```
+```bash
 pi install npm:pi-llama-chooser
 ```
 
@@ -43,22 +43,26 @@ Run `/llama-chooser config` to open a menu:
 
 ### Models
 
-Enabled servers' models appear under the **Llama Chooser** provider in `/model`. Each model displays:
+Enabled servers' models appear under the **Llama Chooser** provider in `/model`. The model name shows the server, model basename, and quantization level (e.g. `myServer / Qwen2.5 (Q6_K)`).
+
+Run `/llama-chooser list` to see full details per model:
 
 - Quantization level (e.g. `Q6_K`)
 - Context window (e.g. `116K ctx`)
 - File size (e.g. `27.9 GB`)
 - Owner (e.g. `[llamacpp]`)
 
+Models with the same basename across servers are automatically deduplicated into a single entry that routes to any online server.
+
 ### Speed Tracker
 
 The footer shows prefill and generation speed while streaming:
 
-```
-⚡ 450t/s 🔥 85.3t/s
+```bash
+⚡450t/s 🔥85.3t/s
 ```
 
-Rates are color-coded (red → orange → yellow → green → cyan) and use a moving window for generation speed.
+Rates are color-coded (red → orange → yellow → lime → cyan → violet) and use a moving window for generation speed.
 
 ## Configuration
 
