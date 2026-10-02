@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2025-10-02
+
+### Changed
+
+- **README** — clarified model display locations, added deduplication note,
+  fixed speed tracker example and color gradient, added language tags to all
+  code blocks (MD040).
+
 ## [0.3.1] — 2025-07-17
 
 ### Fixed
