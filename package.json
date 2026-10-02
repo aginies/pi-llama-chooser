@@ -39,7 +39,6 @@
 	"scripts": {
 		"dev": "pi --extension ./src/index.ts",
 		"typecheck": "tsc --noEmit",
-		"test": "tsx test/refresh.test.ts",
 		"prepublishOnly": "npm run typecheck"
 	},
 	"publishConfig": {
