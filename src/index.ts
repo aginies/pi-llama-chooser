@@ -73,6 +73,8 @@ interface LlamaModel {
 	name?: string;
 	object?: string;
 	owned_by?: string;
+	/** Gufo: context length at top level. */
+	context_length?: number;
 	meta?: {
 		n_ctx?: number;
 		n_ctx_train?: number;
@@ -276,7 +278,8 @@ export function formatFileSize(bytes: number): string {
 export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelConfig {
 	const name = basename(model.id);
 	const quant = model.meta?.ftype;
-	const ctxSize = model.meta?.n_ctx;
+	// Gufo puts context_length at top level; llama.cpp puts n_ctx inside meta.
+	const ctxSize = model.context_length ?? model.meta?.n_ctx;
 	const displayName = quant ? `${name} (${quant})` : name;
 	return {
 		id: `${server.name}${SERVER_SEP}${displayName}`,
