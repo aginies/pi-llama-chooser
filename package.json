@@ -1,0 +1,59 @@
+{
+	"name": "pi-llama-chooser",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Pi extension: manage remote llama.cpp servers and use their models via /model",
+	"author": {
+		"name": "aginies",
+		"email": "antoine@ginies.org"
+	},
+	"keywords": [
+		"pi-package",
+		"pi-extension",
+		"llama.cpp",
+		"llama-chooser",
+		"llama"
+	],
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/aginies/pi-llama-chooser"
+	},
+	"homepage": "https://github.com/aginies/pi-llama-chooser",
+	"bugs": {
+		"url": "https://github.com/aginies/pi-llama-chooser/issues"
+	},
+	"files": [
+		"src/index.ts",
+		"src/helper.ts",
+		"src/speed.ts"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"dev": "pi --extension ./src/index.ts",
+		"typecheck": "tsc --noEmit",
+		"test": "tsx test/refresh.test.ts",
+		"prepublishOnly": "npm run typecheck"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"dependencies": {
+		"@earendil-works/pi-ai": "^1.0.0"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"@types/node": "^22.0.0",
+		"tsx": "^4.23.15",
+		"typescript": "^5.5.0"
+	}
+}
