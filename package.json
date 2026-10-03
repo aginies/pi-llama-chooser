@@ -45,11 +45,9 @@
 	"publishConfig": {
 		"access": "public"
 	},
-	"dependencies": {
-		"@earendil-works/pi-ai": "^1.0.0"
-	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*"
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.0.0",
