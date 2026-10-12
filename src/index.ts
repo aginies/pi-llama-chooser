@@ -5,7 +5,8 @@
  * models under the "llama-chooser" provider. Includes a TPS (tokens/second)
  * speed tracker in the footer.
  *
- * Servers are persisted in ~/.pi/llama-chooser-servers.json.
+ * Servers are persisted in ~/.pi/agent/llama-chooser-servers.json
+ * (override the path with the LLAMA_CHOOSER_STORAGE env var).
  *
  * Streaming is delegated to Pi's built-in OpenAI Chat Completions adapter
  * (llama.cpp is OpenAI-compatible), so message conversion, tool handling,
@@ -31,6 +32,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionCommandContext,
+	ProviderConfig,
 	ProviderModelConfig,
 	SessionStartEvent,
 	SessionShutdownEvent,
@@ -56,7 +58,7 @@ import { createSpeedTracker, type SpeedDeps } from "./speed.ts";
 // Types
 // =============================================================================
 
-interface LlamaServer {
+export interface LlamaServer {
 	name: string;
 	host: string;
 	port: number;
@@ -68,7 +70,7 @@ interface LlamaServer {
 	contextOverride?: number;
 }
 
-interface LlamaModel {
+export interface LlamaModel {
 	id: string;
 	name?: string;
 	object?: string;
@@ -100,6 +102,7 @@ const STORAGE_PATH =
 const DEFAULT_CONTEXT_WINDOW = 32_768;
 const DEFAULT_MAX_TOKENS = 4_096;
 const FETCH_TIMEOUT_MS = 10_000;
+const PING_TIMEOUT_MS = 1_500;
 /** Cache TTL for model fetch results (60s). */
 const MODEL_CACHE_TTL = 60_000;
 /** Cache TTL for ping results (30s). */
@@ -111,8 +114,10 @@ const SERVER_SEP = " / ";
 // Cached state
 // =============================================================================
 
-/** In-memory server cache. Re-read from disk only on first load or after write. */
+/** In-memory server cache. Re-read from disk when file changes or cache is empty. */
 let serversCache: LlamaServer[] | null = null;
+let serversMtime = 0;
+let serversSize = -1;
 
 /** Per-server model cache: key = "host:port". */
 const modelCache = new Map<string, { models: LlamaModel[]; fetchedAt: number }>();
@@ -129,9 +134,12 @@ function errorMessage(error: unknown): string {
 }
 
 export function loadServers(): LlamaServer[] {
-	if (serversCache !== null) return serversCache;
 	try {
 		if (fs.existsSync(STORAGE_PATH)) {
+			const stat = fs.statSync(STORAGE_PATH);
+			if (serversCache !== null && stat.mtimeMs === serversMtime && stat.size === serversSize) {
+				return serversCache;
+			}
 			const parsed = JSON.parse(fs.readFileSync(STORAGE_PATH, "utf-8"));
 			if (Array.isArray(parsed)) {
 				serversCache = parsed.filter((s): s is LlamaServer =>
@@ -142,12 +150,20 @@ export function loadServers(): LlamaServer[] {
 					typeof s.port === "number" &&
 					(s.protocol === "http" || s.protocol === "https"),
 				);
+				serversMtime = stat.mtimeMs;
+				serversSize = stat.size;
 				return serversCache;
 			}
+		} else {
+			serversCache = [];
+			serversMtime = 0;
+			serversSize = -1;
+			return serversCache;
 		}
 	} catch (error) {
 		console.error(`llama-chooser: failed to load servers: ${errorMessage(error)}`);
 	}
+	if (serversCache !== null) return serversCache;
 	serversCache = [];
 	return serversCache;
 }
@@ -163,6 +179,14 @@ export function saveServers(servers: LlamaServer[]): void {
 		});
 		fs.renameSync(tmpPath, STORAGE_PATH);
 		serversCache = servers; // update in-memory cache
+		try {
+			const stat = fs.statSync(STORAGE_PATH);
+			serversMtime = stat.mtimeMs;
+			serversSize = stat.size;
+		} catch {
+			serversMtime = Date.now();
+			serversSize = -1;
+		}
 	} catch (error) {
 		console.error(`llama-chooser: failed to save servers: ${errorMessage(error)}`);
 	}
@@ -231,7 +255,7 @@ async function fetchModels(
 	signal?: AbortSignal,
 	force = false,
 ): Promise<LlamaModel[]> {
-	const key = `${server.host}:${server.port}`;
+	const key = getServerUrl(server);
 	const cached = modelCache.get(key);
 	if (!force && cached && Date.now() - cached.fetchedAt < MODEL_CACHE_TTL) {
 		return cached.models;
@@ -357,23 +381,216 @@ async function collectModelConfigs(signal?: AbortSignal): Promise<ProviderModelC
  */
 let cachedConfigs: ProviderModelConfig[] = [];
 
+/** Pi API handle, captured at load so config changes can republish the catalog. */
+let piApi: ExtensionAPI | undefined;
+
+/** Monotonic counter so a stale background refresh cannot overwrite a newer one. */
+let liveRefreshSeq = 0;
+
+/**
+ * Server names referenced by a catalog id. Handles the deduplicated format
+ * ("<basename>@<server1>|<server2>") and the legacy one ("<server> / <model>").
+ * Returns [] when the id format is unrecognised.
+ */
+export function serverNamesForConfigId(modelId: string): string[] {
+	const atIdx = modelId.lastIndexOf("@");
+	if (atIdx > 0) {
+		return modelId
+			.slice(atIdx + 1)
+			.split("|")
+			.map((name) => name.trim())
+			.filter(Boolean);
+	}
+	const sep = modelId.indexOf(SERVER_SEP);
+	if (sep > 0) return [modelId.slice(0, sep).trim()];
+	return [];
+}
+
+/**
+ * Identity of a catalog entry that survives a change of the server list:
+ * "<basename>@<server1>|<server2>" and "<server> / <basename>" both reduce to
+ * "<basename>".
+ */
+export function modelKeyFromId(modelId: string): string {
+	const atIdx = modelId.lastIndexOf("@");
+	if (atIdx > 0) return modelId.slice(0, atIdx);
+	const sep = modelId.indexOf(SERVER_SEP);
+	return sep > 0 ? modelId.slice(sep + SERVER_SEP.length) : modelId;
+}
+
+/**
+ * Drop catalog entries whose servers are all disabled or removed, and repoint
+ * the survivors at a server that is still enabled. Entries with an
+ * unrecognised id format are kept rather than silently lost.
+ */
+export function pruneConfigs(
+	configs: ProviderModelConfig[],
+	enabled: LlamaServer[],
+): ProviderModelConfig[] {
+	const byName = new Map(enabled.map((s) => [s.name, s]));
+	const pruned: ProviderModelConfig[] = [];
+	for (const cfg of configs) {
+		const names = serverNamesForConfigId(cfg.id);
+		const remaining = names.flatMap((name) => {
+			const server = byName.get(name);
+			return server ? [server] : [];
+		});
+		if (names.length > 0 && remaining.length === 0) continue;
+		const target = remaining[0];
+		if (!target) {
+			pruned.push(cfg);
+			continue;
+		}
+		const baseUrl = getInferenceUrl(target);
+		pruned.push(cfg.baseUrl === baseUrl ? cfg : { ...cfg, baseUrl });
+	}
+	return pruned;
+}
+
+/** Rebuild catalog entries from the per-server model cache (no network). */
+function configsFromCache(enabled: LlamaServer[]): ProviderModelConfig[] {
+	const configs: ProviderModelConfig[] = [];
+	for (const server of enabled) {
+		const cached = modelCache.get(getServerUrl(server));
+		if (!cached) continue;
+		configs.push(...cached.models.map((m) => toModelConfig(server, m)));
+	}
+	return dedupConfigs(configs);
+}
+
+/**
+ * Catalog matching the servers enabled right now. Prefers regenerating from the
+ * per-server model cache (so ids, base URLs and context overrides reflect the
+ * current config) and falls back to pruning the last published list when a
+ * server has no cached models.
+ */
+function rebuildCatalog(): ProviderModelConfig[] {
+	const enabled = loadServers().filter((s) => s.enabled);
+	if (enabled.length === 0) return [];
+	if (enabled.every((s) => modelCache.has(getServerUrl(s)))) {
+		const fromCache = configsFromCache(enabled);
+		if (fromCache.length > 0) return fromCache;
+	}
+	return pruneConfigs(cachedConfigs, enabled);
+}
+
+/** Drop cached model and ping data for servers that are no longer enabled. */
+function pruneModelCaches(): void {
+	const enabledUrls = new Set(
+		loadServers()
+			.filter((s) => s.enabled)
+			.map((s) => getServerUrl(s)),
+	);
+	for (const key of [...modelCache.keys()]) {
+		if (!enabledUrls.has(key)) modelCache.delete(key);
+	}
+	for (const key of [...pingCache.keys()]) {
+		if (!enabledUrls.has(key)) pingCache.delete(key);
+	}
+}
+
+/** Forget cached model/ping data for one server (e.g. after editing it). */
+function invalidateServerCaches(server: ServerEndpoint): void {
+	const key = getServerUrl(server);
+	modelCache.delete(key);
+	pingCache.delete(key);
+}
+
+/** Hand the current catalog to Pi so /model updates without a restart. */
+function publishCatalog(): void {
+	if (!piApi) return;
+	try {
+		piApi.registerProvider(PROVIDER_ID, llamaProviderConfig(cachedConfigs));
+	} catch (error) {
+		console.error(`llama-chooser: failed to update the model catalog: ${errorMessage(error)}`);
+	}
+}
+
+/**
+ * Fetch models from every enabled server and publish the result. Failures keep
+ * the already-published (pruned) catalog.
+ */
+async function liveRefreshCatalog(): Promise<void> {
+	const seq = ++liveRefreshSeq;
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS + 5_000);
+	try {
+		const fresh = await collectModelConfigs(controller.signal);
+		if (seq !== liveRefreshSeq) return;
+		cachedConfigs = fresh.length > 0 ? fresh : rebuildCatalog();
+		publishCatalog();
+	} catch (error) {
+		if (seq === liveRefreshSeq) {
+			console.error(`llama-chooser: model refresh failed: ${errorMessage(error)}`);
+		}
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** Options for {@link afterConfigChange}. */
+export interface ConfigChangeOptions {
+	/** Re-read models over the network (after add/edit/enable). */
+	live?: boolean;
+	/** UI used to warn when the selected model leaves the catalog. */
+	ui?: Ui;
+	/** Model selected in this session, when it belongs to our provider. */
+	currentModelId?: string;
+}
+
+/**
+ * Re-sync the catalog after any config change and publish it to Pi right away,
+ * so enabling/disabling/removing a server takes effect without restarting pi
+ * or reopening /model.
+ */
+function afterConfigChange(options: ConfigChangeOptions = {}): void {
+	const previousIds = cachedConfigs.map((c) => c.id);
+	pruneModelCaches();
+	cachedConfigs = rebuildCatalog();
+	publishCatalog();
+	const warn = () => warnIfModelLost(options, previousIds);
+	if (options.live) void liveRefreshCatalog().then(warn, warn);
+	else warn();
+}
+
+/** Tell the user when the model they are using just left the catalog. */
+function warnIfModelLost(options: ConfigChangeOptions, previousIds: string[]): void {
+	const { ui, currentModelId } = options;
+	if (!ui || !currentModelId) return;
+	const key = modelKeyFromId(currentModelId);
+	if (!previousIds.some((id) => modelKeyFromId(id) === key)) return;
+	if (cachedConfigs.some((c) => modelKeyFromId(c.id) === key)) return;
+	ui.notify(
+		'The selected model is no longer available (its server was disabled or removed). Use /model to pick another one.',
+		"warning",
+	);
+}
+
 /**
  * Shared refreshModels callback. Live fetches (allowNetwork: true) update the
- * cache and return the fresh list; offline refreshes return the cache so the
- * catalog survives local refreshes without a network round-trip. A live fetch
- * that comes back empty (server down, no models) keeps the last known-good
- * list so a transient failure never wipes the catalog.
+ * cache and return the fresh list; offline refreshes rebuild the catalog from
+ * the current config so models of disabled/removed servers disappear at once.
+ * A live fetch that comes back empty (server down, no models) keeps the last
+ * known-good list so a transient failure never wipes the catalog — except when
+ * no servers are enabled at all: that means the catalog should be empty, so the
+ * cache is cleared instead of keeping stale entries.
  */
 async function refreshModels(context: {
 	allowNetwork: boolean;
 	signal: AbortSignal;
 }): Promise<ProviderModelConfig[]> {
-	if (!context.allowNetwork) return cachedConfigs;
-	const fresh = await collectModelConfigs(context.signal);
-	if (fresh.length > 0) {
-		cachedConfigs = fresh;
-		return fresh;
+	if (loadServers().filter((s) => s.enabled).length === 0) {
+		// No enabled servers: clear the cache so stale entries don't survive
+		// removing/disabling the last server.
+		cachedConfigs = [];
+		return cachedConfigs;
 	}
+	if (!context.allowNetwork) {
+		cachedConfigs = rebuildCatalog();
+		return cachedConfigs;
+	}
+	const fresh = await collectModelConfigs(context.signal);
+	cachedConfigs = fresh.length > 0 ? fresh : rebuildCatalog();
 	return cachedConfigs;
 }
 
@@ -407,12 +624,7 @@ export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfi
 		const serverNames = group.map((g) => g.serverName).filter(Boolean);
 		const id = `${basename}@${serverNames.join("|")}`;
 		const name = `${basename} (${serverNames.join(", ")})`;
-		const merged = { ...first, id, name };
-		// Attach candidate servers for routing (not part of ProviderModelConfig).
-		(merged as ProviderModelConfig & { _servers: LlamaServer[] })._servers = serverNames
-			.map((n) => findServer(n))
-			.filter(Boolean) as LlamaServer[];
-		deduped.push(merged);
+		deduped.push({ ...first, id, name });
 	}
 	return deduped;
 }
@@ -429,19 +641,22 @@ export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfi
  * first server — the next stream will re-ping and update the cache.
  */
 export function serverForModelId(modelId: string): LlamaServer | undefined {
+	// Only enabled servers may serve a request, even if a stale model id still
+	// names one that was just disabled or removed.
+	const enabled = loadServers().filter((s) => s.enabled);
 	// Try new deduplicated format first: "<basename>@<server1>|<server2>|..."
 	const atIdx = modelId.lastIndexOf("@");
 	if (atIdx > 0) {
 		const rawServers = modelId.slice(atIdx + 1).split("|");
 		const servers: LlamaServer[] = [];
 		for (const name of rawServers) {
-			const s = findServer(name.trim());
+			const s = enabled.find((candidate) => candidate.name === name.trim());
 			if (s) servers.push(s);
 		}
 		if (servers.length > 0) {
 			// Return the first online server (from cache); fall back to the first one.
 			for (const s of servers) {
-				const key = `${s.host}:${s.port}`;
+				const key = getServerUrl(s);
 				const cached = pingCache.get(key);
 				if (cached && cached.online) return s;
 			}
@@ -451,7 +666,7 @@ export function serverForModelId(modelId: string): LlamaServer | undefined {
 	// Fall back to legacy format: "<server> / <model>"
 	const sep = modelId.indexOf(SERVER_SEP);
 	if (sep > 0) {
-		return loadServers().find((s) => s.name === modelId.slice(0, sep).trim());
+		return enabled.find((s) => s.name === modelId.slice(0, sep).trim());
 	}
 	return undefined;
 }
@@ -459,6 +674,8 @@ export function serverForModelId(modelId: string): LlamaServer | undefined {
 /** Reset all in-memory caches (useful for testing). */
 export function resetCaches(): void {
 	serversCache = null;
+	serversMtime = 0;
+	serversSize = -1;
 	modelCache.clear();
 	pingCache.clear();
 }
@@ -466,9 +683,11 @@ export function resetCaches(): void {
 /**
  * Ping a server to check if it's reachable, with caching (TTL: 30s).
  * Pass `force: true` to bypass the cache.
+ * Disabled servers are never pinged and return false immediately.
  */
-async function pingServer(server: LlamaServer, force = false): Promise<boolean> {
-	const key = `${server.host}:${server.port}`;
+export async function pingServer(server: LlamaServer, force = false): Promise<boolean> {
+	if (!server.enabled) return false;
+	const key = getServerUrl(server);
 	const cached = pingCache.get(key);
 	if (!force && cached && Date.now() - cached.fetchedAt < PING_CACHE_TTL) {
 		return cached.online;
@@ -480,7 +699,7 @@ async function pingServer(server: LlamaServer, force = false): Promise<boolean> 
 		}
 		const url = `${getInferenceUrl(server)}/models`;
 		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), 3000);
+		const timer = setTimeout(() => controller.abort(), PING_TIMEOUT_MS);
 		try {
 			const res = await fetch(url, { signal: controller.signal, headers });
 			const online = res.status === 200 || res.status === 401;
@@ -495,24 +714,39 @@ async function pingServer(server: LlamaServer, force = false): Promise<boolean> 
 	}
 }
 
+/**
+ * Provider config shared by the initial registration and every catalog
+ * republish. `models` publishes a catalog immediately instead of waiting for
+ * Pi's next refresh.
+ */
+function llamaProviderConfig(models?: ProviderModelConfig[]): ProviderConfig {
+	return {
+		name: "Llama Chooser",
+		api: "openai-completions",
+		apiKey: "local",
+		...(models ? { models } : {}),
+		refreshModels,
+		streamSimple: (model, context, options) => {
+			const server = serverForModelId(model.id);
+			// The catalog's per-model baseUrl points at the first candidate
+			// server only; override it so deduplicated models are routed to
+			// the (first online) server selected for this id.
+			const routed = server ? { ...model, baseUrl: getInferenceUrl(server) } : model;
+			const key = server?.apiKey?.trim();
+			return compatStreamSimple(routed, context, { ...options, apiKey: key || "local" });
+		},
+	};
+}
+
 function registerLlamaProvider(pi: ExtensionAPI): void {
+	piApi = pi;
 	try {
 		pi.unregisterProvider(PROVIDER_ID);
 	} catch {
 		// Not registered yet.
 	}
 
-	pi.registerProvider(PROVIDER_ID, {
-		name: "Llama Chooser",
-		api: "openai-completions",
-		apiKey: "local",
-		refreshModels,
-		streamSimple: (model, context, options) => {
-			const server = serverForModelId(model.id);
-			const key = server?.apiKey?.trim();
-			return compatStreamSimple(model, context, { ...options, apiKey: key || "local" });
-		},
-	});
+	pi.registerProvider(PROVIDER_ID, llamaProviderConfig());
 }
 
 // =============================================================================
@@ -562,6 +796,7 @@ function setupSpeedTracker(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (_e: SessionShutdownEvent, ctx) => {
+		registered = false;
 		speedTracker?.stop(ctx);
 	});
 }
@@ -572,6 +807,21 @@ function setupSpeedTracker(pi: ExtensionAPI): void {
 
 interface Ui {
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
+}
+
+/** What a config subcommand needs to report changes and re-sync the catalog. */
+interface ConfigScope {
+	ui: Ui;
+	/** Model selected in this session, when it belongs to our provider. */
+	currentModelId?: string;
+}
+
+/** Build a ConfigScope from an extension context. */
+function scopeFromCtx(ctx: ExtensionContext): ConfigScope {
+	return {
+		ui: ctx.ui,
+		currentModelId: ctx.model?.provider === PROVIDER_ID ? ctx.model.id : undefined,
+	};
 }
 
 const SUBCOMMANDS_LIST = `
@@ -608,17 +858,19 @@ async function configList(ui: Ui): Promise<void> {
 	const reachable = await Promise.all(servers.map((s) => pingServer(s)));
 	const lines = servers.map((s, i) => {
 		const bullet = reachable[i] ? "🟢" : "🔴";
-		return `  ${bullet} ${s.enabled ? "✓" : "✗"} ${s.name}: ${getInferenceUrl(s)}`;
+		return `  ${bullet} ${s.name}: ${getInferenceUrl(s)}`;
 	});
 	ui.notify(`Configured servers:\n${lines.join("\n")}`, "info");
 }
 
-function configAdd(rest: string[], ui: Ui): void {
+function configAdd(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
 	if (rest.length < 3) {
 		ui.notify("Usage: /llama-chooser config add <name> <host> <port> [http|https] [apiKey]", "info");
 		return;
 	}
-	const [name, host, port, protocol, apiKey] = rest;
+	const [rawName, host, port, protocol, apiKey] = rest;
+	const name = rawName.trim();
 	if (findServer(name)) {
 		ui.notify(`Server "${name}" already exists. Use /llama-chooser config edit to modify it.`, "error");
 		return;
@@ -631,10 +883,12 @@ function configAdd(rest: string[], ui: Ui): void {
 	const servers = loadServers();
 	servers.push({ name, ...result.server, enabled: true });
 	saveServers(servers);
+	afterConfigChange({ ...scope, live: true });
 	ui.notify(`Added server "${name}" at ${getInferenceUrl(result.server)}`, "info");
 }
 
-function configEdit(rest: string[], ui: Ui): void {
+function configEdit(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
 	if (rest.length < 3) {
 		ui.notify("Usage: /llama-chooser config edit <name> <host> <port> [http|https] [apiKey]", "info");
 		return;
@@ -656,10 +910,14 @@ function configEdit(rest: string[], ui: Ui): void {
 		ui.notify(error, "error");
 		return;
 	}
+	// The endpoint may have moved: forget its cached models before refreshing.
+	invalidateServerCaches(server);
+	afterConfigChange({ ...scope, live: true });
 	ui.notify(`Updated server "${name}" to ${getInferenceUrl(server)}`, "info");
 }
 
-function configRemove(rest: string[], ui: Ui): void {
+function configRemove(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
 	if (rest.length < 1) {
 		ui.notify("Usage: /llama-chooser config remove <name>", "info");
 		return;
@@ -669,10 +927,12 @@ function configRemove(rest: string[], ui: Ui): void {
 		ui.notify(`Server "${name}" not found.`, "error");
 		return;
 	}
+	afterConfigChange(scope);
 	ui.notify(`Removed server "${name}"`, "info");
 }
 
-function configToggleEnabled(rest: string[], ui: Ui, enabled: boolean): void {
+function configToggleEnabled(rest: string[], scope: ConfigScope, enabled: boolean): void {
+	const ui = scope.ui;
 	if (rest.length < 1) {
 		ui.notify(`Usage: /llama-chooser config ${enabled ? "enable" : "disable"} <name>`, "info");
 		return;
@@ -684,18 +944,21 @@ function configToggleEnabled(rest: string[], ui: Ui, enabled: boolean): void {
 		ui.notify(error, "error");
 		return;
 	}
+	// Enabling needs a live fetch; disabling only prunes the published catalog.
+	afterConfigChange({ ...scope, live: enabled });
 	ui.notify(`${enabled ? "Enabled" : "Disabled"} server "${rest[0]}"`, "info");
 }
 
-function configEnable(rest: string[], ui: Ui): void {
-	configToggleEnabled(rest, ui, true);
+function configEnable(rest: string[], scope: ConfigScope): void {
+	configToggleEnabled(rest, scope, true);
 }
 
-function configDisable(rest: string[], ui: Ui): void {
-	configToggleEnabled(rest, ui, false);
+function configDisable(rest: string[], scope: ConfigScope): void {
+	configToggleEnabled(rest, scope, false);
 }
 
-async function configRefresh(ui: Ui): Promise<void> {
+async function configRefresh(scope: ConfigScope): Promise<void> {
+	const ui = scope.ui;
 	const enabled = loadServers().filter((s) => s.enabled);
 	if (enabled.length === 0) {
 		ui.notify("No enabled servers to refresh.", "info");
@@ -715,6 +978,8 @@ async function configRefresh(ui: Ui): Promise<void> {
 			}
 		}),
 	);
+	// Publish the freshly fetched models so /model shows them right away.
+	afterConfigChange(scope);
 	ui.notify(`Model refresh complete:\n${results.join("\n")}\nModels are available in /model.`, "info");
 }
 
@@ -730,9 +995,12 @@ const REFRESH_OPTION = "Refresh models";
 const REMOVE_OPTION = "Remove server";
 const BACK_OPTION = "< Back to server list";
 
-function serverLabel(server: LlamaServer, online: boolean): string {
+export function serverLabel(server: LlamaServer, online?: boolean): string {
+	if (!server.enabled) {
+		return `⚪ ✗ ${server.name}  (${server.host}:${server.port})`;
+	}
 	const bullet = online ? "🟢" : "🔴";
-	return `${bullet} ${server.enabled ? "✓" : "✗"} ${server.name}  (${server.host}:${server.port})`;
+	return `${bullet} ✓ ${server.name}  (${server.host}:${server.port})`;
 }
 
 async function showServerMenu(ctx: ExtensionCommandContext): Promise<void> {
@@ -740,6 +1008,7 @@ async function showServerMenu(ctx: ExtensionCommandContext): Promise<void> {
 		const servers = loadServers();
 		const labels = await Promise.all(
 			servers.map(async (s) => {
+				if (!s.enabled) return serverLabel(s);
 				const online = await pingServer(s);
 				return serverLabel(s, online);
 			}),
@@ -774,15 +1043,17 @@ async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
 
 	// Final gate: validate the complete server before persisting.
 	const finalCheck = validateServerArgs(name, host, String(port), protocol, apiKey);
-	if (finalCheck.error) {
-		ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
+	if (finalCheck.error || !finalCheck.server) {
+		ctx.ui.notify(`Validation error: ${finalCheck.error ?? "Invalid arguments."}`, "error");
 		return;
 	}
+	const endpoint = finalCheck.server;
 
 	const servers = loadServers();
-	servers.push({ name, host, port, protocol, apiKey, enabled: true });
+	servers.push({ name, ...endpoint, enabled: true });
 	saveServers(servers);
-	ctx.ui.notify(`Added server "${name}" at ${getInferenceUrl({ host, port, protocol })}`, "info");
+	afterConfigChange({ ...scopeFromCtx(ctx), live: true });
+	ctx.ui.notify(`Added server "${name}" at ${getInferenceUrl(endpoint)}`, "info");
 }
 
 async function promptServerName(ctx: ExtensionCommandContext): Promise<string | undefined> {
@@ -845,6 +1116,7 @@ async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServe
 	while (running) {
 		const info = [
 			`Name:     ${server.name}`,
+			`Status:   ${server.enabled ? "enabled" : "disabled"}`,
 			`Host:     ${server.host}`,
 			`Port:     ${server.port}`,
 			`Protocol: ${server.protocol}`,
@@ -871,11 +1143,16 @@ async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServe
 			continue;
 		}
 		if (choice === (server.enabled ? DISABLE_OPTION : ENABLE_OPTION)) {
+			const targetEnabled = !server.enabled;
 			mutateServer(server.name, (s) => {
-				s.enabled = !s.enabled;
+				s.enabled = targetEnabled;
 			});
-			// mutateServer mutates in place; flip the local reference.
-			server.enabled = !server.enabled;
+			const updated = findServer(server.name);
+			if (updated) server = updated;
+			else server.enabled = targetEnabled;
+			// Reflect the change in /model right away; enabling needs a live fetch.
+			afterConfigChange({ ...scopeFromCtx(ctx), live: server.enabled });
+			ctx.ui.notify(`${server.enabled ? "Enabled" : "Disabled"} server "${server.name}".`, "info");
 			continue;
 		}
 		if (choice === REFRESH_OPTION) {
@@ -886,6 +1163,7 @@ async function showServerDetail(ctx: ExtensionCommandContext, server: LlamaServe
 			const ok = await ctx.ui.confirm("Remove server", `Remove "${server.name}"?`);
 			if (ok) {
 				removeServer(server.name);
+				afterConfigChange(scopeFromCtx(ctx));
 				ctx.ui.notify(`Removed server "${server.name}"`, "info");
 				return;
 			}
@@ -909,22 +1187,26 @@ async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServe
 
 	// Final gate: validate the complete server before persisting.
 	const finalCheck = validateServerArgs(server.name, host, String(port), protocol, apiKey);
-	if (finalCheck.error) {
-		ctx.ui.notify(`Validation error: ${finalCheck.error}`, "error");
+	if (finalCheck.error || !finalCheck.server) {
+		ctx.ui.notify(`Validation error: ${finalCheck.error ?? "Invalid arguments."}`, "error");
 		return;
 	}
+	const endpoint = finalCheck.server;
 
 	const error = mutateServer(server.name, (s) => {
-		s.host = host;
-		s.port = port;
-		s.protocol = protocol;
-		s.apiKey = apiKey;
+		s.host = endpoint.host;
+		s.port = endpoint.port;
+		s.protocol = endpoint.protocol;
+		s.apiKey = endpoint.apiKey;
 	});
 	if (error) {
 		ctx.ui.notify(error, "error");
 		return;
 	}
-	ctx.ui.notify(`Updated server "${server.name}" to ${getInferenceUrl({ host, port, protocol })}`, "info");
+	// The endpoint may have moved: forget its cached models before refreshing.
+	invalidateServerCaches(endpoint);
+	afterConfigChange({ ...scopeFromCtx(ctx), live: true });
+	ctx.ui.notify(`Updated server "${server.name}" to ${getInferenceUrl(endpoint)}`, "info");
 }
 
 async function promptEditHost(ctx: ExtensionCommandContext, server: LlamaServer): Promise<string | undefined> {
@@ -977,13 +1259,16 @@ async function promptEditApiKey(ctx: ExtensionCommandContext, server: LlamaServe
 async function refreshOneServer(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
 	try {
 		const models = await fetchModels(server, undefined, true);
+		// Publish the freshly fetched models so /model shows them right away.
+		afterConfigChange(scopeFromCtx(ctx));
 		ctx.ui.notify(`${server.name}: ${models.length} model(s) available.`, "info");
 	} catch (error) {
 		ctx.ui.notify(`Could not reach ${server.name}: ${errorMessage(error)}`, "error");
 	}
 }
 
-function configSetContextOverride(rest: string[], ui: Ui): void {
+function configSetContextOverride(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
 	if (rest.length < 2) {
 		ui.notify("Usage: /llama-chooser config set-ctx <name> <ctx>", "info");
 		return;
@@ -1001,6 +1286,7 @@ function configSetContextOverride(rest: string[], ui: Ui): void {
 		ui.notify(error, "error");
 		return;
 	}
+	afterConfigChange(scope);
 	ui.notify(ctx > 0
 		? `Set context window for "${name}" to ${formatCtxSize(ctx)}.`
 		: `Cleared context window override for "${name}".`,
@@ -1008,7 +1294,8 @@ function configSetContextOverride(rest: string[], ui: Ui): void {
 	);
 }
 
-function configClearContextOverride(rest: string[], ui: Ui): void {
+function configClearContextOverride(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
 	if (rest.length < 1) {
 		ui.notify("Usage: /llama-chooser config clear-ctx <name>", "info");
 		return;
@@ -1020,6 +1307,7 @@ function configClearContextOverride(rest: string[], ui: Ui): void {
 		ui.notify(error, "error");
 		return;
 	}
+	afterConfigChange(scope);
 	ui.notify(`Cleared context window override for "${rest[0]}".`, "info");
 }
 
@@ -1027,7 +1315,8 @@ function configClearContextOverride(rest: string[], ui: Ui): void {
 // Command handlers
 // =============================================================================
 
-async function handleConfigCli(rest: string[], ui: Ui): Promise<void> {
+async function handleConfigCli(rest: string[], scope: ConfigScope): Promise<void> {
+	const ui = scope.ui;
 	const subcommand = (rest[0] ?? "").toLowerCase();
 	const args = rest.slice(1);
 	switch (subcommand) {
@@ -1035,28 +1324,28 @@ async function handleConfigCli(rest: string[], ui: Ui): Promise<void> {
 			await configList(ui);
 			return;
 		case "add":
-			configAdd(args, ui);
+			configAdd(args, scope);
 			return;
 		case "edit":
-			configEdit(args, ui);
+			configEdit(args, scope);
 			return;
 		case "remove":
-			configRemove(args, ui);
+			configRemove(args, scope);
 			return;
 		case "enable":
-			configEnable(args, ui);
+			configEnable(args, scope);
 			return;
 		case "disable":
-			configDisable(args, ui);
+			configDisable(args, scope);
 			return;
 		case "refresh":
-			await configRefresh(ui);
+			await configRefresh(scope);
 			return;
 		case "set-ctx":
-			configSetContextOverride(rest, ui);
+			configSetContextOverride(args, scope);
 			return;
 		case "clear-ctx":
-			configClearContextOverride(rest, ui);
+			configClearContextOverride(args, scope);
 			return;
 		default:
 			ui.notify(CONFIG_USAGE, "info");
@@ -1145,7 +1434,7 @@ export default function (pi: ExtensionAPI) {
 						await showServerMenu(ctx);
 						return;
 					}
-					await handleConfigCli(rest, ui);
+					await handleConfigCli(rest, scopeFromCtx(ctx));
 					return;
 				case "list":
 					await handleList(rest, ui);

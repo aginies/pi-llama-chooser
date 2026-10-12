@@ -5,15 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-10-12
+
+### Fixed
+
+- **Config changes take effect immediately** — disabling, enabling, editing or
+  removing a server now republishes the model catalog to Pi right away
+  (`pi.registerProvider` with the rebuilt model list) instead of waiting for a
+  restart. Previously the published catalog was only rebuilt on a live
+  `refreshModels` call, so `/model` kept showing models of disabled or removed
+  servers until pi was restarted.
+- **Server enable/disable toggle persistence** — fixed a double-inversion bug
+  in the interactive server detail menu where in-place mutation caused the
+  toggled enablement state to revert immediately.
+- **Server menu startup latency** — `showServerMenu` and `pingServer` skip
+  network requests for disabled servers, eliminating the 3-second timeout freeze
+  when opening `/llama-chooser config` or returning from server details when an
+  offline server is disabled.
+- **Disabled server display indicator** — `serverLabel` now displays a distinct
+  `⚪ ✗` badge for disabled servers instead of a misleading green indicator.
+- **External config file reloading** — `loadServers` tracks file modification
+  time and size, reloading servers automatically when the config file is edited
+  outside of the interactive menu.
+- **Offline refreshes no longer return stale models** — `refreshModels` with
+  `allowNetwork: false` rebuilds the catalog from the current server config
+  (regenerating ids, base URLs and context-window overrides) instead of
+  returning the cached list verbatim.
+- **Live refresh fallback is pruned** — when a live fetch comes back empty,
+  the retained "last known-good" catalog is now pruned to the servers that are
+  still enabled, so an unreachable server no longer keeps a disabled one alive
+  in `/model`.
+- **Routing ignores disabled servers** — `serverForModelId` only considers
+  enabled servers, so a stale deduplicated id (`model@alpha|beta`) can never
+  route a request to a server that was just disabled.
+
+### Added
+
+- **Warning when the selected model disappears** — if the model in use belongs
+  to a server that was disabled or removed, the extension notifies you to pick
+  another one with `/model`.
+- Cached model data for servers that are no longer enabled is dropped, and
+  edited servers invalidate their model/ping cache so the new endpoint is
+  re-fetched.
+
+[0.5.1]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.5.1
+
 ## [0.5.0] — 2026-10-03
 
 ### Changed
-- **Remove `@earendil-works/pi-ai` dependency** — the `pi-ai` package is no longer a runtime dependency. The extension now uses only `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` as peer dependencies.
-- **Add `@earendil-works/pi-tui` as peer dependency** — the extension now depends on the TUI package for terminal UI rendering.
+- **Declare `@earendil-works/pi-ai` as peer dependency** — the extension
+  runtime-imports `streamSimple` from `@earendil-works/pi-ai/compat`; the
+  dependency is now declared explicitly instead of relying on npm hoisting
+  from `@earendil-works/pi-coding-agent`.
+- **Remove unused `@earendil-works/pi-tui` peer dependency** — the extension
+  never imports the TUI package; it was declared in error.
 
 [0.5.0]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.5.0
 
 ## [0.4.0] — 2026-10-02
+
+### Changed
+
+- Re-release of the 0.3.4 changes (version bump only, no code changes).
+
+## [0.3.4] — 2026-10-02
 
 ### Changed
 

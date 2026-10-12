@@ -1,11 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { LlamaServer, LlamaModel, ProviderModelConfig } from "../src/index";
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { LlamaServer, LlamaModel } from "../src/index";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Chat-model view of the ProviderModelConfig union (which also covers image/classifier configs). */
+type ChatModelConfig = Extract<ProviderModelConfig, { reasoning: boolean }>;
+
+function asChatConfig(cfg: ProviderModelConfig): ChatModelConfig {
+	if (typeof (cfg as ChatModelConfig).reasoning !== "boolean") {
+		throw new Error(`Expected a chat model config, got: ${cfg.id}`);
+	}
+	return cfg as ChatModelConfig;
+}
 
 // Use a test-only storage path to avoid clobbering the real config at
 // ~/.pi/agent/llama-chooser-servers.json.
@@ -222,7 +233,7 @@ describe("storage", () => {
 
 	it("saves and loads servers", async () => {
 		const { saveServers, loadServers } = await loadModule();
-		const servers = [
+		const servers: LlamaServer[] = [
 			{ name: "server1", host: "192.168.1.1", port: 8080, protocol: "http", enabled: true },
 		];
 		saveServers(servers);
@@ -279,6 +290,47 @@ describe("storage", () => {
 		const server = findServer("server1");
 		expect(server?.contextOverride).toBe(8192);
 	});
+
+	it("reloads servers from storage when file is modified externally", async () => {
+		setupTestStorage([
+			{ name: "server1", host: "192.168.1.1", port: 8080, protocol: "http", enabled: true },
+		]);
+		const { loadServers } = await loadModule();
+		expect(loadServers()[0].enabled).toBe(true);
+
+		// External modification: disabling the server directly in the file
+		setupTestStorage([
+			{ name: "server1", host: "192.168.1.1", port: 8080, protocol: "http", enabled: false },
+		]);
+		expect(loadServers()[0].enabled).toBe(false);
+	});
+
+	it("toggles server enabled state and reflects it in findServer and loadServers", async () => {
+		setupTestStorage([
+			{ name: "server1", host: "192.168.1.1", port: 8080, protocol: "http", enabled: false },
+		]);
+		const { mutateServer, findServer, loadServers } = await loadModule();
+		const server = findServer("server1");
+		expect(server?.enabled).toBe(false);
+
+		// Toggle to enabled
+		const targetEnabled = !server!.enabled;
+		mutateServer("server1", (s) => {
+			s.enabled = targetEnabled;
+		});
+
+		const updated = findServer("server1");
+		expect(updated?.enabled).toBe(true);
+		expect(loadServers()[0].enabled).toBe(true);
+
+		// Toggle back to disabled
+		const targetDisabled = !updated!.enabled;
+		mutateServer("server1", (s) => {
+			s.enabled = targetDisabled;
+		});
+		expect(findServer("server1")?.enabled).toBe(false);
+		expect(loadServers()[0].enabled).toBe(false);
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -304,7 +356,7 @@ describe("toModelConfig", () => {
 
 	it("creates correct model config", async () => {
 		const { toModelConfig } = await loadModule();
-		const config = toModelConfig(server, model);
+		const config = asChatConfig(toModelConfig(server, model));
 		expect(config.id).toBe("my-server / Qwen3.6-35B-A3B-UD-Q6_K (Q6_K)");
 		expect(config.name).toBe("my-server / Qwen3.6-35B-A3B-UD-Q6_K (Q6_K)");
 		expect(config.api).toBe("openai-completions");
@@ -316,14 +368,14 @@ describe("toModelConfig", () => {
 	it("uses contextOverride when set", async () => {
 		const { toModelConfig } = await loadModule();
 		const serverWithOverride: LlamaServer = { ...server, contextOverride: 8192 };
-		const config = toModelConfig(serverWithOverride, model);
+		const config = asChatConfig(toModelConfig(serverWithOverride, model));
 		expect(config.contextWindow).toBe(8192);
 		expect(config.maxTokens).toBe(8192);
 	});
 
 	it("falls back to model n_ctx", async () => {
 		const { toModelConfig } = await loadModule();
-		const config = toModelConfig(server, model);
+		const config = asChatConfig(toModelConfig(server, model));
 		expect(config.contextWindow).toBe(32768);
 		expect(config.maxTokens).toBe(32768);
 	});
@@ -331,7 +383,7 @@ describe("toModelConfig", () => {
 	it("falls back to defaults when no context", async () => {
 		const { toModelConfig } = await loadModule();
 		const modelNoCtx: LlamaModel = { id: "model.gguf", meta: {} };
-		const config = toModelConfig(server, modelNoCtx);
+		const config = asChatConfig(toModelConfig(server, modelNoCtx));
 		expect(config.contextWindow).toBe(32768);
 		expect(config.maxTokens).toBe(4096);
 	});
@@ -352,13 +404,15 @@ describe("toModelConfig", () => {
 
 	it("sets compat flags", async () => {
 		const { toModelConfig } = await loadModule();
-		const config = toModelConfig(server, model);
-		expect(config.compat.supportsStore).toBe(false);
-		expect(config.compat.supportsDeveloperRole).toBe(false);
-		expect(config.compat.supportsReasoningEffort).toBe(false);
-		expect(config.compat.supportsUsageInStreaming).toBe(true);
-		expect(config.compat.supportsStrictMode).toBe(false);
-		expect(config.compat.maxTokensField).toBe("max_tokens");
+		const config = asChatConfig(toModelConfig(server, model));
+		expect(config.compat).toEqual({
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			supportsUsageInStreaming: true,
+			supportsStrictMode: false,
+			maxTokensField: "max_tokens",
+		});
 	});
 });
 
@@ -367,7 +421,7 @@ describe("toModelConfig", () => {
 // ---------------------------------------------------------------------------
 
 describe("dedupConfigs", () => {
-	function makeConfig(overrides: Partial<ProviderModelConfig> = {}): ProviderModelConfig {
+	function makeConfig(overrides: Partial<ChatModelConfig> = {}): ChatModelConfig {
 		return {
 			id: "server1 / model",
 			name: "server1 / model",
@@ -494,5 +548,56 @@ describe("URL helpers", () => {
 		expect(getInferenceUrl({ host: "192.168.1.1", port: 8080, protocol: "http" as any })).toBe(
 			"http://192.168.1.1:8080/v1",
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// serverLabel
+// ---------------------------------------------------------------------------
+
+describe("serverLabel", () => {
+	const server: LlamaServer = {
+		name: "my-server",
+		host: "192.168.1.1",
+		port: 8080,
+		protocol: "http",
+		enabled: true,
+	};
+
+	it("formats label for enabled online server", async () => {
+		const { serverLabel } = await loadModule();
+		expect(serverLabel(server, true)).toBe("🟢 ✓ my-server  (192.168.1.1:8080)");
+	});
+
+	it("formats label for enabled offline server", async () => {
+		const { serverLabel } = await loadModule();
+		expect(serverLabel(server, false)).toBe("🔴 ✓ my-server  (192.168.1.1:8080)");
+	});
+
+	it("formats label for disabled server with white bullet and cross", async () => {
+		const { serverLabel } = await loadModule();
+		const disabled: LlamaServer = { ...server, enabled: false };
+		expect(serverLabel(disabled)).toBe("⚪ ✗ my-server  (192.168.1.1:8080)");
+		// Online flag should be ignored when disabled
+		expect(serverLabel(disabled, true)).toBe("⚪ ✗ my-server  (192.168.1.1:8080)");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// pingServer with disabled servers
+// ---------------------------------------------------------------------------
+
+describe("pingServer", () => {
+	it("returns false immediately without network request when server is disabled", async () => {
+		const { pingServer } = await loadModule();
+		const disabled: LlamaServer = {
+			name: "disabled-server",
+			host: "127.0.0.1",
+			port: 9999, // Unused port that would fail/hang if pinged
+			protocol: "http",
+			enabled: false,
+		};
+		const online = await pingServer(disabled);
+		expect(online).toBe(false);
 	});
 });

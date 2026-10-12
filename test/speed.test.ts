@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createSpeedTracker, STATUS_KEY } from "../src/speed";
 
 describe("STATUS_KEY", () => {
@@ -10,7 +11,7 @@ describe("STATUS_KEY", () => {
 describe("createSpeedTracker", () => {
 	const createDeps = (overrides = {}): import("../src/speed").SpeedDeps => ({
 		isActive: () => true,
-		hasUI: () => false,
+		hasUI: (_ctx): _ctx is ExtensionContext => false,
 		isOurs: () => true,
 		enabled: () => true,
 		...overrides,

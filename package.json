@@ -1,6 +1,6 @@
 {
 	"name": "pi-llama-chooser",
-	"version": "0.5.0",
+	"version": "0.5.1",
 	"type": "module",
 	"description": "Pi extension: manage remote llama.cpp servers and use their models via /model",
 	"author": {
@@ -47,7 +47,7 @@
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
-		"@earendil-works/pi-tui": "*"
+		"@earendil-works/pi-ai": "*"
 	},
 	"devDependencies": {
 		"@types/node": "^22.0.0",

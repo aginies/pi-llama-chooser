@@ -31,6 +31,9 @@ Requires `@earendil-works/pi-coding-agent` and Node.js ≥ 22.19.0.
 | `/llama-chooser config enable <name>` | Enable a server |
 | `/llama-chooser config disable <name>` | Disable a server |
 | `/llama-chooser config refresh` | Refresh models from all enabled servers |
+| `/llama-chooser config list` | List configured servers (with online status) |
+| `/llama-chooser config set-ctx <name> <ctx>` | Set context window override (0 = default) |
+| `/llama-chooser config clear-ctx <name>` | Clear context window override |
 | `/llama-chooser list [server]` | List models (from all enabled or a specific server) |
 
 ### Interactive Menu
@@ -38,12 +41,14 @@ Requires `@earendil-works/pi-coding-agent` and Node.js ≥ 22.19.0.
 Run `/llama-chooser config` to open a menu:
 
 1. **Add a server** — step-by-step wizard for name, host, port, protocol, API key
-2. **Select a server** — see status (🟢 online / 🔴 offline, ✓ enabled / ✗ disabled)
+2. **Select a server** — see status (🟢 online / 🔴 offline / ⚪ disabled, ✓ enabled / ✗ disabled)
 3. **Server actions** — edit values, enable/disable, refresh models, remove
 
 ### Models
 
 Enabled servers' models appear under the **Llama Chooser** provider in `/model`. The model name shows the server, model basename, and quantization level (e.g. `myServer / Qwen2.5 (Q6_K)`).
+
+Config changes apply immediately — no `/reload` or restart needed. Disabling or removing a server drops its models from `/model` at once, and enabling or adding one fetches and publishes its models right away. If the model you are currently using disappears, you get a notification to pick another one with `/model`.
 
 Run `/llama-chooser list` to see full details per model:
 
@@ -67,6 +72,7 @@ Rates are color-coded (red → orange → yellow → lime → cyan → violet) a
 ## Configuration
 
 Servers are stored in `~/.pi/agent/llama-chooser-servers.json`.
+Set the `LLAMA_CHOOSER_STORAGE` environment variable to use a different path.
 
 ```json
 [

@@ -70,9 +70,9 @@ function formatRate(rate: number): string {
 
 /**
  * 6-stop gradient color for TPS display.
- * Interpolates through ANSI 256-color codes from red (0%) to cyan (100%+).
+ * Interpolates through ANSI 256-color codes from red (0%) to dark violet (100%+).
  *
- * Stops: red → orange → yellow → lime → spring-green → cyan
+ * Stops: red → orange → yellow → lime → cyan → dark violet
  */
 function rateColor(rate: number, kind: "prefill" | "gen"): string {
 	const maxRate = kind === "prefill" ? 2000 : 100;
