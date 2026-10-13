@@ -112,6 +112,38 @@ describe("basename", () => {
 });
 
 // ---------------------------------------------------------------------------
+// extractQuant
+// ---------------------------------------------------------------------------
+
+describe("extractQuant", () => {
+	it("extracts standard quantizations with letters and numbers", async () => {
+		const { extractQuant } = await loadModule();
+		expect(extractQuant("model-Q8_0.gguf")).toBe("Q8_0");
+		expect(extractQuant("model-Q4_0.gguf")).toBe("Q4_0");
+		expect(extractQuant("model-Q4_1.gguf")).toBe("Q4_1");
+		expect(extractQuant("model-Q5_0.gguf")).toBe("Q5_0");
+		expect(extractQuant("model-Q5_1.gguf")).toBe("Q5_1");
+		expect(extractQuant("model-Q4_K_M.gguf")).toBe("Q4_K_M");
+		expect(extractQuant("model-Q6_K.gguf")).toBe("Q6_K");
+	});
+
+	it("extracts IQ and float quantizations", async () => {
+		const { extractQuant } = await loadModule();
+		expect(extractQuant("model-IQ2_XXS.gguf")).toBe("IQ2_XXS");
+		expect(extractQuant("model-IQ3_M.gguf")).toBe("IQ3_M");
+		expect(extractQuant("model-F16.gguf")).toBe("F16");
+		expect(extractQuant("model-BF16.gguf")).toBe("BF16");
+		expect(extractQuant("model-F32.gguf")).toBe("F32");
+	});
+
+	it("returns null when no quantization is found", async () => {
+		const { extractQuant } = await loadModule();
+		expect(extractQuant("model.gguf")).toBeNull();
+		expect(extractQuant("qwen-coder")).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // formatCtxSize
 // ---------------------------------------------------------------------------
 
@@ -373,6 +405,14 @@ describe("toModelConfig", () => {
 		expect(config.maxTokens).toBe(8192);
 	});
 
+	it("treats contextOverride of 0 as default (falls back to model n_ctx)", async () => {
+		const { toModelConfig } = await loadModule();
+		const serverWithZeroOverride: LlamaServer = { ...server, contextOverride: 0 };
+		const config = asChatConfig(toModelConfig(serverWithZeroOverride, model));
+		expect(config.contextWindow).toBe(32768);
+		expect(config.maxTokens).toBe(32768);
+	});
+
 	it("falls back to model n_ctx", async () => {
 		const { toModelConfig } = await loadModule();
 		const config = asChatConfig(toModelConfig(server, model));
@@ -460,10 +500,10 @@ describe("dedupConfigs", () => {
 		];
 		const result = dedupConfigs(configs);
 		expect(result).toHaveLength(1);
-		expect(result[0].id).toContain("@");
-		expect(result[0].id).toContain("|");
-		expect(result[0].name).toContain("(");
-		expect(result[0].name).toContain(")");
+		expect(result[0].id).toBe("model@server1|server2");
+		expect(result[0].name).toBe("model (server1, server2)");
+		expect(result[0].id).not.toContain("function");
+		expect(result[0].name).not.toContain("function");
 	});
 
 	it("keeps different models separate", async () => {

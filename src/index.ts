@@ -89,7 +89,7 @@ export interface LlamaModel {
 }
 
 /** Pre-compiled regex for GGUF quantization extraction. */
-const QUANT_RE = /(Q[0-9]_[A-Z_]+|IQ[0-9]_[A-Z_0-9]+|F[0-9]+[BE]?)/;
+const QUANT_RE = /(Q[0-9]_[A-Z0-9_]+|IQ[0-9]_[A-Z0-9_]+|B?F[0-9]+[BE]?)/;
 
 // =============================================================================
 // Constants
@@ -269,7 +269,12 @@ async function fetchModels(
 		signal,
 		headers,
 	);
-	const models = Array.isArray(data.data) ? data.data : [];
+	const models = Array.isArray(data.data)
+		? data.data.filter(
+				(m): m is LlamaModel =>
+					typeof m === "object" && m !== null && typeof m.id === "string",
+			)
+		: [];
 	modelCache.set(key, { models, fetchedAt: Date.now() });
 	return models;
 }
@@ -319,6 +324,10 @@ export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderM
 	// Gufo puts context_length at top level; llama.cpp puts n_ctx inside meta.
 	const ctxSize = model.context_length ?? model.meta?.n_ctx;
 	const displayName = quant ? `${name} (${quant})` : name;
+	const ctxOverride =
+		server.contextOverride !== undefined && server.contextOverride > 0
+			? server.contextOverride
+			: undefined;
 	return {
 		id: `${server.name}${SERVER_SEP}${displayName}`,
 		name: `${server.name} / ${displayName}`,
@@ -326,8 +335,8 @@ export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderM
 		baseUrl: getInferenceUrl(server),
 		input: ["text"],
 		reasoning: false,
-		contextWindow: server.contextOverride ?? ctxSize ?? DEFAULT_CONTEXT_WINDOW,
-		maxTokens: server.contextOverride ?? ctxSize ?? DEFAULT_MAX_TOKENS,
+		contextWindow: ctxOverride ?? ctxSize ?? DEFAULT_CONTEXT_WINDOW,
+		maxTokens: ctxOverride ?? ctxSize ?? DEFAULT_MAX_TOKENS,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		compat: {
 			supportsStore: false,
@@ -603,18 +612,18 @@ export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfi
 	const byBasename = new Map<string, { cfg: ProviderModelConfig; serverName: string }[]>();
 	for (const cfg of configs) {
 		const slashIdx = cfg.name.lastIndexOf("/");
-		const basename = slashIdx >= 0 ? cfg.name.slice(slashIdx + 1) : cfg.name;
+		const modelName = slashIdx >= 0 ? cfg.name.slice(slashIdx + 1).trim() : cfg.name.trim();
 		const serverName = slashIdx >= 0 ? cfg.name.slice(0, slashIdx).trim() : cfg.name;
-		const entry = byBasename.get(basename);
+		const entry = byBasename.get(modelName);
 		if (entry) {
 			entry.push({ cfg, serverName });
 		} else {
-			byBasename.set(basename, [{ cfg, serverName }]);
+			byBasename.set(modelName, [{ cfg, serverName }]);
 		}
 	}
 
 	const deduped: ProviderModelConfig[] = [];
-	for (const [, group] of byBasename) {
+	for (const [modelName, group] of byBasename) {
 		if (group.length === 1) {
 			deduped.push(group[0].cfg);
 			continue;
@@ -622,8 +631,8 @@ export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfi
 		// Merge: first config becomes canonical, server list appended.
 		const first = group[0].cfg;
 		const serverNames = group.map((g) => g.serverName).filter(Boolean);
-		const id = `${basename}@${serverNames.join("|")}`;
-		const name = `${basename} (${serverNames.join(", ")})`;
+		const id = `${modelName}@${serverNames.join("|")}`;
+		const name = `${modelName} (${serverNames.join(", ")})`;
 		deduped.push({ ...first, id, name });
 	}
 	return deduped;
@@ -792,6 +801,7 @@ function setupSpeedTracker(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (_e: SessionStartEvent, ctx) => {
+		registered = true;
 		speedTracker?.start(ctx);
 	});
 
@@ -869,12 +879,13 @@ function configAdd(rest: string[], scope: ConfigScope): void {
 		ui.notify("Usage: /llama-chooser config add <name> <host> <port> [http|https] [apiKey]", "info");
 		return;
 	}
-	const [rawName, host, port, protocol, apiKey] = rest;
+	const [rawName, host, port, rawProtocol, apiKey] = rest;
 	const name = rawName.trim();
 	if (findServer(name)) {
 		ui.notify(`Server "${name}" already exists. Use /llama-chooser config edit to modify it.`, "error");
 		return;
 	}
+	const protocol = rawProtocol || "http";
 	const result = validateServerArgs(name, host, port, protocol, apiKey);
 	if (result.error || !result.server) {
 		ui.notify(result.error ?? "Invalid arguments.", "error");
@@ -893,13 +904,18 @@ function configEdit(rest: string[], scope: ConfigScope): void {
 		ui.notify("Usage: /llama-chooser config edit <name> <host> <port> [http|https] [apiKey]", "info");
 		return;
 	}
-	const [name, host, port, protocol, apiKey] = rest;
+	const [name, host, port, rawProtocol, apiKey] = rest;
+	const existing = findServer(name);
+	const protocol = rawProtocol || existing?.protocol || "http";
 	const result = validateServerArgs(name, host, port, protocol, apiKey);
 	if (result.error || !result.server) {
 		ui.notify(result.error ?? "Invalid arguments.", "error");
 		return;
 	}
 	const server = result.server;
+	if (existing) {
+		invalidateServerCaches(existing);
+	}
 	const error = mutateServer(name, (s) => {
 		s.host = server.host;
 		s.port = server.port;
@@ -1203,7 +1219,8 @@ async function editServerWizard(ctx: ExtensionCommandContext, server: LlamaServe
 		ctx.ui.notify(error, "error");
 		return;
 	}
-	// The endpoint may have moved: forget its cached models before refreshing.
+	// The endpoint may have moved: forget cached models for both old and new endpoints.
+	invalidateServerCaches(server);
 	invalidateServerCaches(endpoint);
 	afterConfigChange({ ...scopeFromCtx(ctx), live: true });
 	ctx.ui.notify(`Updated server "${server.name}" to ${getInferenceUrl(endpoint)}`, "info");
@@ -1250,10 +1267,12 @@ async function promptEditProtocol(
 
 async function promptEditApiKey(ctx: ExtensionCommandContext, server: LlamaServer): Promise<string | undefined> {
 	const raw = await ctx.ui.input(
-		`API key — current: ${server.apiKey ? "set" : "none"} (Enter to keep)`,
+		`API key — current: ${server.apiKey ? "set" : "none"} (Enter to keep, '-' to clear)`,
 	);
 	if (raw === undefined) return undefined;
-	return raw.trim() !== "" ? raw.trim() : server.apiKey;
+	const trimmed = raw.trim();
+	if (trimmed === "-" || trimmed.toLowerCase() === "none") return "";
+	return trimmed !== "" ? trimmed : server.apiKey;
 }
 
 async function refreshOneServer(ctx: ExtensionCommandContext, server: LlamaServer): Promise<void> {
@@ -1418,6 +1437,45 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("llama-chooser", {
 		description: "Manage remote llama.cpp servers and their models (config, list)",
 		getArgumentCompletions: (prefix) => {
+			const configSubcommands = [
+				"list",
+				"add",
+				"edit",
+				"remove",
+				"enable",
+				"disable",
+				"refresh",
+				"set-ctx",
+				"clear-ctx",
+			];
+			if (prefix.startsWith("config ")) {
+				const rest = prefix.slice("config ".length);
+				if (!rest.includes(" ")) {
+					const matched = configSubcommands.filter((sub) => sub.startsWith(rest));
+					return matched.length > 0
+						? matched.map((sub) => ({ value: `config ${sub}`, label: `config ${sub}` }))
+						: null;
+				}
+				const parts = rest.split(/\s+/);
+				const sub = parts[0]?.toLowerCase();
+				const serverPrefix = parts[1] ?? "";
+				if (["edit", "remove", "enable", "disable", "set-ctx", "clear-ctx"].includes(sub)) {
+					const serverNames = loadServers().map((s) => s.name);
+					const matched = serverNames.filter((n) => n.startsWith(serverPrefix));
+					return matched.length > 0
+						? matched.map((n) => ({ value: `config ${sub} ${n}`, label: n }))
+						: null;
+				}
+				return null;
+			}
+			if (prefix.startsWith("list ")) {
+				const serverPrefix = prefix.slice("list ".length).trim();
+				const serverNames = loadServers().map((s) => s.name);
+				const matched = serverNames.filter((n) => n.startsWith(serverPrefix));
+				return matched.length > 0
+					? matched.map((n) => ({ value: `list ${n}`, label: n }))
+					: null;
+			}
 			const subcommands = ["config", "list"];
 			const filtered = subcommands.filter((s) => s.startsWith(prefix));
 			return filtered.length > 0 ? filtered.map((s) => ({ value: s, label: s })) : null;

@@ -120,6 +120,34 @@ describe("createSpeedTracker", () => {
 		expect(() => tracker.stop(undefined)).not.toThrow();
 	});
 
+	it("renders pending prefill indicator on new request and clears on stop", () => {
+		const statuses: (string | undefined)[] = [];
+		const mockCtx = {
+			hasUI: true,
+			model: { provider: "llama-chooser", id: "m" },
+			ui: {
+				setStatus: (_key: string, val: string | undefined) => {
+					statuses.push(val);
+				},
+			},
+		} as unknown as ExtensionContext;
+
+		const deps: import("../src/speed").SpeedDeps = {
+			isActive: () => true,
+			hasUI: (c): c is ExtensionContext => !!c && (c as any).hasUI,
+			isOurs: () => true,
+			enabled: () => true,
+		};
+
+		const tracker = createSpeedTracker(deps);
+		tracker.onRequest(mockCtx);
+		expect(statuses.length).toBeGreaterThan(0);
+		expect(statuses[statuses.length - 1]).toContain("⚡…");
+
+		tracker.stop(mockCtx);
+		expect(statuses[statuses.length - 1]).toBeUndefined();
+	});
+
 	it("handles undefined context gracefully", () => {
 		const deps = createDeps();
 		const tracker = createSpeedTracker(deps);

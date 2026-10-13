@@ -27,6 +27,12 @@ describe("validateName", () => {
 	it("rejects names with __", () => {
 		expect(validateName("my__server")).toBe("Name must not contain '__'.");
 	});
+
+	it("rejects names with delimiter characters @, |, or /", () => {
+		expect(validateName("my@server")).toBe("Name must not contain '@', '|', or '/'.");
+		expect(validateName("my|server")).toBe("Name must not contain '@', '|', or '/'.");
+		expect(validateName("my/server")).toBe("Name must not contain '@', '|', or '/'.");
+	});
 });
 
 describe("validateHost", () => {

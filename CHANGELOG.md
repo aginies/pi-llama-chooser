@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] — 2026-10-13
+
+### Fixed
+
+- **Deduplicated model ID and name corruption** — fixed loop variable destructuring in `dedupConfigs` that previously injected the literal JavaScript source code of `function basename(...)` into deduplicated model IDs and names.
+- **Quantization regex coverage** — `extractQuant` now recognizes standard GGUF quantizations containing numbers after an underscore (`Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`) and `BF16`.
+- **Speed tracker reactivation on session start** — restored `registered = true` in `pi.on("session_start")` so the speed tracker stays operational across session reloads and switches after `session_shutdown`.
+- **Speed tracker prefill state reset** — `resetInternal()` and `onRequest()` now clear `lastPrefillTps`, ensuring that new requests display the pending prefill status (`⚡…`) instead of stale metrics from previous turns.
+- **Protocol defaulting in CLI `config add` and `config edit`** — `config add` now defaults protocol to `"http"` when omitted, fulfilling the documented 3-argument syntax (`/llama-chooser config add <name> <host> <port>`). `config edit` preserves the existing configured protocol when omitted.
+- **Context override fallback for 0** — `toModelConfig` properly handles `contextOverride: 0` by falling back to the model's native context window instead of evaluating to a 0-token window.
+- **Cache invalidation on server edit** — both old server address and new endpoint caches are invalidated when updating a server's configuration.
+- **API key removal in server edit wizard** — `promptEditApiKey` now allows users to clear an existing API key by typing `-` or `none`.
+- **Server name delimiter validation** — `validateName` rejects `@`, `|`, and `/` characters to protect model ID formats and routing lookups.
+- **Robust model list handling** — `fetchModels` defensively filters out invalid or malformed upstream model objects missing string IDs.
+
+### Added
+
+- **Command argument auto-completion** — `/llama-chooser` command now autocompletes config subcommands (`add`, `edit`, `remove`, `enable`, `disable`, `refresh`, `set-ctx`, `clear-ctx`) and configured server names.
+
+[0.5.2]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.5.2
+
 ## [0.5.1] — 2026-10-12
 
 ### Fixed

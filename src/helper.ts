@@ -31,6 +31,7 @@ export function validateName(value: string): string | null {
 	if (!name) return "Name is required.";
 	if (/\s/.test(name)) return "Name must not contain spaces.";
 	if (name.includes("__")) return "Name must not contain '__'.";
+	if (/[@|/]/.test(name)) return "Name must not contain '@', '|', or '/'.";
 	return null;
 }
 

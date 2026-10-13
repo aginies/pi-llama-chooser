@@ -302,4 +302,26 @@ describe("catalog sync on config change", () => {
 		await new Promise((r) => setTimeout(r, 200));
 		expect(publishedIds().some((id) => id.includes("beta"))).toBe(true);
 	});
+
+	it("adds a server with omitted protocol defaulting to http", async () => {
+		const command = fake.commands.get("llama-chooser");
+		await command.handler("config add gamma 127.0.0.1 9000", createFakeCtx(notifications));
+		expect(notifications.join("\n")).toContain('Added server "gamma" at http://127.0.0.1:9000/v1');
+	});
+
+	it("edits a server with omitted protocol preserving current protocol", async () => {
+		const command = fake.commands.get("llama-chooser");
+		await command.handler("config edit alpha 127.0.0.1 9001", createFakeCtx(notifications));
+		expect(notifications.join("\n")).toContain('Updated server "alpha" to http://127.0.0.1:9001/v1');
+	});
+
+	it("provides argument completions for config subcommands and server names", async () => {
+		const command = fake.commands.get("llama-chooser");
+		const configCompletions = command.getArgumentCompletions("config ");
+		expect(configCompletions.some((c: any) => c.value === "config add")).toBe(true);
+		expect(configCompletions.some((c: any) => c.value === "config enable")).toBe(true);
+
+		const serverCompletions = command.getArgumentCompletions("config enable ");
+		expect(serverCompletions.some((c: any) => c.value === "config enable alpha")).toBe(true);
+	});
 });

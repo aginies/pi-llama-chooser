@@ -148,6 +148,7 @@ export function createSpeedTracker(deps: SpeedDeps) {
 		firstTokenAt = undefined;
 		tokenCount = 0;
 		samples = [];
+		lastPrefillTps = undefined;
 		lastGenTps = undefined;
 		statusActive = false;
 		lastSentText = "";
@@ -236,6 +237,8 @@ export function createSpeedTracker(deps: SpeedDeps) {
 			firstTokenAt = undefined;
 			tokenCount = 0;
 			samples = [{ ts: Date.now(), n: 0 }];
+			lastPrefillTps = undefined;
+			lastGenTps = undefined;
 			render(ctx, true);
 		},
 
