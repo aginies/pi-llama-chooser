@@ -47,6 +47,7 @@ import type {
 	ModelSelectEvent,
 } from "@earendil-works/pi-coding-agent";
 import { streamSimple as compatStreamSimple } from "@earendil-works/pi-ai/compat";
+import type { AnyModel, RefreshModelsContext } from "@earendil-works/pi-ai";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -470,6 +471,35 @@ export function pruneConfigs(
 	return pruned;
 }
 
+/**
+ * Keep only catalog entries that have at least one online server, so a
+ * disabled or offline server never lists models. A deduplicated entry
+ * ("<basename>@<server1>|<server2>") survives when any candidate server is
+ * online. Entries with an unrecognised id format are kept rather than
+ * silently lost.
+ */
+export async function filterOnlineConfigs(
+	configs: ProviderModelConfig[],
+	enabled: LlamaServer[],
+	signal?: AbortSignal,
+): Promise<ProviderModelConfig[]> {
+	if (configs.length === 0) return [];
+	const online = new Set<string>();
+	await Promise.all(
+		enabled.map(async (server) => {
+			if (signal?.aborted) return false;
+			const up = await pingServer(server);
+			if (up) online.add(server.name);
+			return up;
+		}),
+	);
+	return configs.filter((cfg) => {
+		const names = serverNamesForConfigId(cfg.id);
+		if (names.length === 0) return true;
+		return names.some((name) => online.has(name));
+	});
+}
+
 /** Rebuild catalog entries from the per-server model cache (no network). */
 function configsFromCache(enabled: LlamaServer[]): ProviderModelConfig[] {
 	const configs: ProviderModelConfig[] = [];
@@ -591,29 +621,58 @@ function warnIfModelLost(options: ConfigChangeOptions, previousIds: string[]): v
 
 /**
  * Shared refreshModels callback. Live fetches (allowNetwork: true) update the
- * cache and return the fresh list; offline refreshes rebuild the catalog from
- * the current config so models of disabled/removed servers disappear at once.
+ * cache, persist the catalog via context.publish, and return the fresh list;
+ * offline refreshes rebuild the catalog from the current config so models of
+ * disabled/removed servers disappear at once.
+ *
+ * Pi never runs a live refresh for one-shot commands such as `pi
+ * --list-models`: the process starts, refreshModels runs offline, and the
+ * snapshot is printed. A fresh process has no in-memory cache, so the offline
+ * path falls back to the catalog persisted by the last live refresh (from any
+ * interactive session), pruned against the servers enabled right now. The
+ * offline path then drops entries whose servers are offline right now, so a
+ * disabled or unreachable server never lists models.
+ *
  * A live fetch that comes back empty (server down, no models) keeps the last
  * known-good list so a transient failure never wipes the catalog — except when
- * no servers are enabled at all: that means the catalog should be empty, so the
- * cache is cleared instead of keeping stale entries.
+ * no servers are enabled at all: that means the catalog should be empty, so
+ * the cache is cleared and the persisted entry dropped.
  */
-async function refreshModels(context: {
-	allowNetwork: boolean;
-	signal: AbortSignal;
-}): Promise<ProviderModelConfig[]> {
-	if (loadServers().filter((s) => s.enabled).length === 0) {
+async function refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
+	const enabled = loadServers().filter((s) => s.enabled);
+	// `publish` is part of Pi's refresh contract; guard for test contexts that
+	// omit it.
+	const publish = context.publish;
+	if (enabled.length === 0) {
 		// No enabled servers: clear the cache so stale entries don't survive
-		// removing/disabling the last server.
+		// removing/disabling the last server, and drop the persisted catalog
+		// so fresh processes (e.g. `pi --list-models`) don't list it either.
 		cachedConfigs = [];
+		await publish?.({ persist: null });
 		return cachedConfigs;
 	}
 	if (!context.allowNetwork) {
 		cachedConfigs = rebuildCatalog();
+		// Fresh processes (e.g. `pi --list-models`) have no in-memory cache;
+		// fall back to the catalog persisted by the last live refresh, pruned
+		// to the servers enabled right now.
+		if (cachedConfigs.length === 0 && context.stored?.models?.length) {
+			cachedConfigs = pruneConfigs([...context.stored.models] as ProviderModelConfig[], enabled);
+		}
+		// A server that is offline right now never lists models, even if the
+		// cached/stored catalog still names it.
+		cachedConfigs = await filterOnlineConfigs(cachedConfigs, enabled, context.signal);
 		return cachedConfigs;
 	}
 	const fresh = await collectModelConfigs(context.signal);
 	cachedConfigs = fresh.length > 0 ? fresh : rebuildCatalog();
+	// Persist so offline consumers in fresh processes (e.g. `pi --list-models`)
+	// can list the last known catalog. The store types entries as AnyModel[];
+	// the configs round-trip fine (persisted models without `type` read back
+	// as chat models).
+	await publish?.({
+		persist: { models: cachedConfigs as AnyModel[], checkedAt: Date.now() },
+	});
 	return cachedConfigs;
 }
 
@@ -722,6 +781,7 @@ export function resetCaches(): void {
 	serversSize = -1;
 	modelCache.clear();
 	pingCache.clear();
+	cachedConfigs = [];
 	resetSettingsCache();
 }
 

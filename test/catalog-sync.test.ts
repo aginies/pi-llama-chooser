@@ -121,6 +121,145 @@ describe("pruneConfigs", () => {
 });
 
 // ---------------------------------------------------------------------------
+// filterOnlineConfigs: offline servers never list models
+// ---------------------------------------------------------------------------
+
+describe("filterOnlineConfigs", () => {
+	let gamma: { server: Server; port: number };
+
+	beforeAll(async () => {
+		gamma = await startModelServer(["/models/gamma-qwen.gguf"]);
+	});
+
+	afterAll(async () => {
+		await new Promise((r) => gamma.server.close(r));
+	});
+
+	const onlineServer: LlamaServer = {
+		name: "gamma",
+		host: "127.0.0.1",
+		port: 0, // filled in per test
+		protocol: "http",
+		enabled: true,
+	};
+	const offlineServer: LlamaServer = {
+		name: "delta",
+		host: "127.0.0.1",
+		port: 1,
+		protocol: "http",
+		enabled: true,
+	};
+	const disabledServer: LlamaServer = { ...offlineServer, name: "epsilon", enabled: false };
+
+	it("drops entries whose server is offline", async () => {
+		const { filterOnlineConfigs, resetCaches } = await loadModule();
+		resetCaches();
+		const configs = [cfg("delta / Llama (Q4_K_M)", "delta / Llama (Q4_K_M)", "http://127.0.0.1:1/v1")];
+		expect(await filterOnlineConfigs(configs, [offlineServer])).toEqual([]);
+	});
+
+	it("keeps entries whose server is online", async () => {
+		const { filterOnlineConfigs, resetCaches } = await loadModule();
+		resetCaches();
+		const server = { ...onlineServer, port: gamma.port };
+		const configs = [cfg("gamma / Qwen (Q6_K)", "gamma / Qwen (Q6_K)", `http://127.0.0.1:${gamma.port}/v1`)];
+		expect((await filterOnlineConfigs(configs, [server])).map((c) => c.id)).toEqual(["gamma / Qwen (Q6_K)"]);
+	});
+
+	it("keeps a deduplicated entry when any candidate is online", async () => {
+		const { filterOnlineConfigs, resetCaches } = await loadModule();
+		resetCaches();
+		const server = { ...onlineServer, port: gamma.port };
+		const configs = [cfg("Qwen (Q6_K)@gamma|delta", "Qwen (Q6_K) (gamma, delta)", "http://127.0.0.1/v1")];
+		expect(await filterOnlineConfigs(configs, [server, offlineServer])).toHaveLength(1);
+	});
+
+	it("drops a deduplicated entry when every candidate is offline", async () => {
+		const { filterOnlineConfigs, resetCaches } = await loadModule();
+		resetCaches();
+		const configs = [cfg("Qwen (Q6_K)@delta|epsilon", "Qwen (Q6_K) (delta, epsilon)", "http://127.0.0.1/v1")];
+		expect(await filterOnlineConfigs(configs, [offlineServer, disabledServer])).toEqual([]);
+	});
+
+	it("keeps entries with an unrecognised id", async () => {
+		const { filterOnlineConfigs, resetCaches } = await loadModule();
+		resetCaches();
+		const configs = [cfg("mystery", "mystery", "http://127.0.0.1:9/v1")];
+		expect(await filterOnlineConfigs(configs, [offlineServer])).toEqual(configs);
+	});
+
+	it("returns [] for an empty catalog", async () => {
+		const { filterOnlineConfigs } = await loadModule();
+		expect(await filterOnlineConfigs([], [offlineServer])).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Offline refresh in a fresh process (pi --list-models): only online servers
+// ---------------------------------------------------------------------------
+
+describe("offline refresh in a fresh process", () => {
+	let gamma: { server: Server; port: number };
+	let fake: FakePi;
+
+	beforeAll(async () => {
+		gamma = await startModelServer(["/models/gamma-qwen.gguf"]);
+	});
+
+	afterAll(async () => {
+		await new Promise((r) => gamma.server.close(r));
+		cleanupStorage();
+	});
+
+	beforeEach(async () => {
+		cleanupStorage();
+		setupStorage([
+			{ name: "gamma", host: "127.0.0.1", port: gamma.port, protocol: "http", enabled: true },
+			{ name: "delta", host: "127.0.0.1", port: 1, protocol: "http", enabled: true },
+		]);
+		const { resetCaches, default: activate } = await loadModule();
+		resetCaches();
+		fake = createFakePi();
+		activate(fake.pi);
+	});
+
+	afterEach(cleanupStorage);
+
+	it("lists only models of online servers from the stored catalog", async () => {
+		const provider = fake.providers.get("llama-chooser");
+		const stored = {
+			models: [
+				cfg("gamma / Qwen (Q6_K)", "gamma / Qwen (Q6_K)", `http://127.0.0.1:${gamma.port}/v1`),
+				cfg("delta / Llama (Q4_K_M)", "delta / Llama (Q4_K_M)", "http://127.0.0.1:1/v1"),
+			],
+			checkedAt: Date.now(),
+		};
+		const models = await provider.refreshModels({
+			allowNetwork: false,
+			signal: new AbortController().signal,
+			stored,
+			publish: async () => true,
+		});
+		expect(models.map((m: any) => m.id)).toEqual(["gamma / Qwen (Q6_K)"]);
+	});
+
+	it("lists no models when every server is offline", async () => {
+		const provider = fake.providers.get("llama-chooser");
+		const stored = {
+			models: [cfg("delta / Llama (Q4_K_M)", "delta / Llama (Q4_K_M)", "http://127.0.0.1:1/v1")],
+			checkedAt: Date.now(),
+		};
+		const models = await provider.refreshModels({
+			allowNetwork: false,
+			signal: new AbortController().signal,
+			stored,
+			publish: async () => true,
+		});
+		expect(models).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // serverForModelId ignores disabled servers
 // ---------------------------------------------------------------------------
 
@@ -323,5 +462,134 @@ describe("catalog sync on config change", () => {
 
 		const serverCompletions = command.getArgumentCompletions("config enable ");
 		expect(serverCompletions.some((c: any) => c.value === "config enable alpha")).toBe(true);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Models-store persistence: fresh processes (e.g. `pi --list-models`) run
+// refreshModels offline with no in-memory cache, so they must fall back to
+// the catalog persisted by the last live refresh.
+// ---------------------------------------------------------------------------
+
+describe("models store persistence (pi --list-models)", () => {
+	let alpha: { server: Server; port: number };
+	let beta: { server: Server; port: number };
+	let fake: FakePi;
+
+	beforeAll(async () => {
+		alpha = await startModelServer(["/models/alpha-qwen.gguf"]);
+		beta = await startModelServer(["/models/beta-llama.gguf"]);
+	});
+
+	afterAll(async () => {
+		await new Promise((r) => alpha.server.close(r));
+		await new Promise((r) => beta.server.close(r));
+		cleanupStorage();
+	});
+
+	beforeEach(async () => {
+		cleanupStorage();
+		setupStorage([
+			{ name: "alpha", host: "127.0.0.1", port: alpha.port, protocol: "http", enabled: true },
+			{ name: "beta", host: "127.0.0.1", port: beta.port, protocol: "http", enabled: true },
+		]);
+		const { resetCaches, default: activate } = await loadModule();
+		resetCaches();
+		fake = createFakePi();
+		activate(fake.pi);
+	});
+
+	afterEach(cleanupStorage);
+
+	function offlineContext(extra: Record<string, unknown> = {}) {
+		return {
+			allowNetwork: false,
+			signal: new AbortController().signal,
+			...extra,
+		};
+	}
+
+	it("persists the catalog via publish on a live refresh", async () => {
+		const publishes: any[] = [];
+		const provider = fake.providers.get("llama-chooser");
+		const models = await provider.refreshModels({
+			allowNetwork: true,
+			signal: new AbortController().signal,
+			publish: async (p: any) => {
+				publishes.push(p);
+				return true;
+			},
+		});
+		expect(publishes).toHaveLength(1);
+		expect(publishes[0].persist.checkedAt).toBeTypeOf("number");
+		expect(publishes[0].persist.models).toEqual(models);
+		expect(models.length).toBeGreaterThan(0);
+	});
+
+	it("falls back to the persisted catalog in a fresh process (offline)", async () => {
+		// resetCaches() in beforeEach emptied the in-memory catalog: this is
+		// exactly the state a fresh `pi --list-models` process starts in.
+		const provider = fake.providers.get("llama-chooser");
+		const models = await provider.refreshModels(
+			offlineContext({
+				stored: {
+					models: [
+						cfg("alpha / Stored-Qwen (Q8_0)", "alpha / Stored-Qwen (Q8_0)", "http://127.0.0.1:1/v1"),
+						cfg("beta / Stored-Llama (Q4_K_M)", "beta / Stored-Llama (Q4_K_M)", "http://127.0.0.1:2/v1"),
+					],
+				},
+			}),
+		);
+		expect(models.map((m: any) => m.id)).toEqual(["alpha / Stored-Qwen (Q8_0)", "beta / Stored-Llama (Q4_K_M)"]);
+	});
+
+	it("prunes the persisted catalog against currently enabled servers", async () => {
+		setupStorage([{ name: "alpha", host: "127.0.0.1", port: alpha.port, protocol: "http", enabled: true }]);
+		const { resetCaches } = await loadModule();
+		resetCaches();
+		const provider = fake.providers.get("llama-chooser");
+		const models = await provider.refreshModels(
+			offlineContext({
+				stored: {
+					models: [
+						cfg("alpha / Stored-Qwen (Q8_0)", "alpha / Stored-Qwen (Q8_0)", "http://127.0.0.1:1/v1"),
+						cfg("beta / Stored-Llama (Q4_K_M)", "beta / Stored-Llama (Q4_K_M)", "http://127.0.0.1:2/v1"),
+					],
+				},
+			}),
+		);
+		expect(models.map((m: any) => m.id)).toEqual(["alpha / Stored-Qwen (Q8_0)"]);
+	});
+
+	it("prefers the in-memory catalog over a stale persisted one", async () => {
+		const provider = fake.providers.get("llama-chooser");
+		await provider.refreshModels({ allowNetwork: true, signal: new AbortController().signal });
+		const models = await provider.refreshModels(
+			offlineContext({
+				stored: { models: [cfg("beta / Stale (Q4_K_M)", "beta / Stale (Q4_K_M)", "http://127.0.0.1:2/v1")] },
+			}),
+		);
+		expect(models.some((m: any) => m.id.includes("Stale"))).toBe(false);
+		expect(models.length).toBeGreaterThan(0);
+	});
+
+	it("clears the persisted catalog when no servers are enabled", async () => {
+		setupStorage([{ name: "alpha", host: "127.0.0.1", port: alpha.port, protocol: "http", enabled: false }]);
+		const { resetCaches } = await loadModule();
+		resetCaches();
+		const publishes: any[] = [];
+		const provider = fake.providers.get("llama-chooser");
+		const models = await provider.refreshModels(
+			offlineContext({
+				stored: { models: [cfg("alpha / Stored-Qwen (Q8_0)", "alpha / Stored-Qwen (Q8_0)", "http://127.0.0.1:1/v1")] },
+				publish: async (p: any) => {
+					publishes.push(p);
+					return true;
+				},
+			}),
+		);
+		expect(models).toEqual([]);
+		expect(publishes).toHaveLength(1);
+		expect(publishes[0].persist).toBeNull();
 	});
 });
