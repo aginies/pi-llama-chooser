@@ -34,6 +34,7 @@ Requires `@earendil-works/pi-coding-agent` and Node.js ≥ 22.19.0.
 | `/llama-chooser config list` | List configured servers (with online status) |
 | `/llama-chooser config set-ctx <name> <ctx>` | Set context window override (0 = default) |
 | `/llama-chooser config clear-ctx <name>` | Clear context window override |
+| `/llama-chooser config dedup <on\|off\|status>` | Merge identical models across servers into one `/model` row, or keep one row per server |
 | `/llama-chooser list [server]` | List models (from all enabled or a specific server) |
 
 ### Interactive Menu
@@ -41,12 +42,21 @@ Requires `@earendil-works/pi-coding-agent` and Node.js ≥ 22.19.0.
 Run `/llama-chooser config` to open a menu:
 
 1. **Add a server** — step-by-step wizard for name, host, port, protocol, API key
-2. **Select a server** — see status (🟢 online / 🔴 offline / ⚪ disabled, ✓ enabled / ✗ disabled)
-3. **Server actions** — edit values, enable/disable, refresh models, remove
+2. **Model rows in /model** — choose one row per server, or one merged row per identical model
+3. **Select a server** — see status (🟢 online / 🔴 offline / ⚪ disabled, ✓ enabled / ✗ disabled)
+4. **Server actions** — edit values, enable/disable, refresh models, remove
 
 ### Models
 
-Enabled servers' models appear under the **Llama Chooser** provider in `/model`. The model name shows the server, model basename, and quantization level (e.g. `myServer / Qwen2.5 (Q6_K)`).
+Enabled servers' models appear under the **Llama Chooser** provider in `/model`. Each entry is named `<server> / <model basename> (<quant>)`, e.g. `myServer / Qwen2.5 (Q6_K)`, so when the same model is loaded on two machines you get two rows and pick the one you want to answer.
+
+If you would rather have a single row per model with automatic failover, run:
+
+```bash
+/llama-chooser config dedup on
+```
+
+Identical models are then merged into one entry (`<model>@<server1>|<server2>`) that routes to the first online server. `config dedup status` shows the current mode, `config dedup off` restores one row per server. The choice is persisted and applies immediately.
 
 Config changes apply immediately — no `/reload` or restart needed. Disabling or removing a server drops its models from `/model` at once, and enabling or adding one fetches and publishes its models right away. If the model you are currently using disappears, you get a notification to pick another one with `/model`.
 
@@ -57,7 +67,7 @@ Run `/llama-chooser list` to see full details per model:
 - File size (e.g. `27.9 GB`)
 - Owner (e.g. `[llamacpp]`)
 
-Models with the same basename across servers are automatically deduplicated into a single entry that routes to any online server.
+Models with the same basename across servers are automatically deduplicated into a single entry that routes to any online server. See [`config dedup`](#commands) to turn this off and keep one selectable row per server.
 
 ### Speed Tracker
 
@@ -72,6 +82,7 @@ Rates are color-coded (red → orange → yellow → lime → cyan → violet) a
 ## Configuration
 
 Servers are stored in `~/.pi/agent/llama-chooser-servers.json`.
+Preferences are stored next to it in `~/.pi/agent/llama-chooser-servers-settings.json`.
 Set the `LLAMA_CHOOSER_STORAGE` environment variable to use a different path.
 
 ```json
@@ -92,6 +103,16 @@ Set the `LLAMA_CHOOSER_STORAGE` environment variable to use a different path.
 - `port` — 1–65535
 - `protocol` — `http` or `https`
 - `apiKey` — optional Bearer token for authentication
+
+Settings file:
+
+```json
+{
+  "dedupModels": false
+}
+```
+
+- `dedupModels` — `false` (default) lists one `/model` row per server; `true` merges identical models into one row that routes to the first online server
 
 ## Development
 

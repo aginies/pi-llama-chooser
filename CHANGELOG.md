@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-10-15
+
+### Changed
+
+- **Server selection in `/model`** — models served by several servers are no longer collapsed into one unselectable row. Each enabled server now contributes its own entry (`<server> / <Model> (<quant>)`), so the machine that answers is picked explicitly. This is the new default; the previous merged behaviour is kept behind the `dedup` switch.
+
+### Added
+
+- **`/llama-chooser config dedup <on|off|status>`** — switches the `/model` catalog between one row per server (off, default) and one merged row per identical model that routes to the first online server (on). The choice is persisted in `~/.pi/agent/llama-chooser-servers-settings.json` and applies immediately, no `/reload` needed.
+- **"Model rows in /model" menu entry** — the same switch in the interactive `/llama-chooser config` menu.
+- **Settings persistence** — new `src/settings.ts`: atomic, cached, tolerant reads/writes of the preferences sidecar (bad or missing JSON falls back to defaults rather than hiding the catalog).
+
+### Compatibility
+
+- Ids kept from a previous merged catalog (`<Model>@<server1>|<server2>`) still resolve and stream after switching modes; so do legacy `<server> / <Model>` ids after switching back.
+- The server file keeps its plain-array shape; settings live in a sibling file, so hand-edited configs are unaffected.
+
+[0.6.0]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.6.0
+
 ## [0.5.2] — 2026-10-13
 
 ### Fixed

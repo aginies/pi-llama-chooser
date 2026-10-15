@@ -19,9 +19,14 @@
  *   /llama-chooser list [server]      - List models from a server (or all enabled)
  *
  * Models from enabled servers appear under the "llama-chooser" provider in
- * /model. Each model id is "<server> (<model-basename>)" so ids stay unique
- * across servers; the per-model baseUrl is what actually routes the request.
- * The footer shows the compact id, e.g. "llm-managerR9 (Qwen3.8.gguf)".
+ * /model. Each model id is "<server> / <model-basename> (<quant>)" so a model
+ * loaded on two servers yields two selectable rows; the per-model baseUrl is
+ * what actually routes the request. With `config dedup on`, identical models
+ * are merged into one "<model>@<server1>|<server2>" row that routes to the
+ * first online server instead. The footer shows the compact id.
+ *
+ * Preferences (currently `dedupModels`) live in a JSON sidecar next to the
+ * server file, e.g. ~/.pi/agent/llama-chooser-servers-settings.json.
  *
  * TPS display (footer):
  *   Shows prefill and generation speed while streaming, e.g.
@@ -52,6 +57,13 @@ import {
 	validateServerArgs,
 	type ServerEndpoint,
 } from "./helper.ts";
+import {
+	readSettings,
+	writeSettings,
+	settingsPathFor,
+	resetSettingsCache,
+	type LlamaChooserSettings,
+} from "./settings.ts";
 import { createSpeedTracker, type SpeedDeps } from "./speed.ts";
 
 // =============================================================================
@@ -99,6 +111,8 @@ const PROVIDER_ID = "llama-chooser";
 const STORAGE_PATH =
 	process.env.LLAMA_CHOOSER_STORAGE ??
 	path.join(os.homedir(), ".pi", "agent", "llama-chooser-servers.json");
+/** Preferences sidecar next to the server file. */
+const SETTINGS_PATH = settingsPathFor(STORAGE_PATH);
 const DEFAULT_CONTEXT_WINDOW = 32_768;
 const DEFAULT_MAX_TOKENS = 4_096;
 const FETCH_TIMEOUT_MS = 10_000;
@@ -371,7 +385,7 @@ async function collectModelConfigs(signal?: AbortSignal): Promise<ProviderModelC
 	for (const r of results) {
 		if (r.status === 'fulfilled' && r.value) configs.push(...r.value);
 	}
-	return dedupConfigs(configs);
+	return dedupConfigs(configs, dedupModelsEnabled());
 }
 
 // =============================================================================
@@ -464,7 +478,7 @@ function configsFromCache(enabled: LlamaServer[]): ProviderModelConfig[] {
 		if (!cached) continue;
 		configs.push(...cached.models.map((m) => toModelConfig(server, m)));
 	}
-	return dedupConfigs(configs);
+	return dedupConfigs(configs, dedupModelsEnabled());
 }
 
 /**
@@ -603,12 +617,33 @@ async function refreshModels(context: {
 	return cachedConfigs;
 }
 
+/** Current preferences (see settings.ts). Never throws. */
+function dedupModelsEnabled(): boolean {
+	return readSettings(SETTINGS_PATH).dedupModels;
+}
+
+/** Persist a preference change and make it take effect for this session. */
+function saveSettings(settings: LlamaChooserSettings): void {
+	try {
+		writeSettings(SETTINGS_PATH, settings);
+	} catch (error) {
+		console.error(`llama-chooser: failed to save settings: ${errorMessage(error)}`);
+	}
+}
+
 /**
  * Deduplicate model configs: identical basenames across servers are merged
  * into a single entry. The model id becomes "<basename>@<server1>|<server2>"
  * and routing tries each server in order until one is online.
+ *
+ * With `dedupe` false the catalog is left as-is — one entry per server — so
+ * the serving machine stays selectable in /model.
  */
-export function dedupConfigs(configs: ProviderModelConfig[]): ProviderModelConfig[] {
+export function dedupConfigs(
+	configs: ProviderModelConfig[],
+	dedupe: boolean,
+): ProviderModelConfig[] {
+	if (!dedupe) return configs;
 	const byBasename = new Map<string, { cfg: ProviderModelConfig; serverName: string }[]>();
 	for (const cfg of configs) {
 		const slashIdx = cfg.name.lastIndexOf("/");
@@ -687,6 +722,7 @@ export function resetCaches(): void {
 	serversSize = -1;
 	modelCache.clear();
 	pingCache.clear();
+	resetSettingsCache();
 }
 
 /**
@@ -843,7 +879,8 @@ const SUBCOMMANDS_LIST = `
   disable <name>                            Disable a server
   refresh                                   Refresh the model list
   set-ctx <name> <ctx>                      Set context window override (0 = default)
-  clear-ctx <name>                          Clear context window override`;
+  clear-ctx <name>                          Clear context window override
+  dedup <on|off|status>                     One merged /model row per model, or one row per server`;
 
 const USAGE = `Llama Chooser
 
@@ -1004,6 +1041,9 @@ async function configRefresh(scope: ConfigScope): Promise<void> {
 // =============================================================================
 
 const ADD_SERVER_OPTION = "+ Add a server";
+const MODEL_ROWS_OPTION = "Model rows in /model";
+const ROWS_PER_SERVER_OPTION = "One row per server — pick the machine";
+const ROWS_MERGED_OPTION = "One merged row per model — first online server";
 const EDIT_OPTION = "Edit values";
 const ENABLE_OPTION = "Enable";
 const DISABLE_OPTION = "Disable";
@@ -1029,7 +1069,7 @@ async function showServerMenu(ctx: ExtensionCommandContext): Promise<void> {
 				return serverLabel(s, online);
 			}),
 		);
-		const options = [ADD_SERVER_OPTION, ...labels];
+		const options = [ADD_SERVER_OPTION, MODEL_ROWS_OPTION, ...labels];
 		const labelToServer = new Map(labels.map((label, i) => [label, servers[i]]));
 		const choice = await ctx.ui.select("Llama Chooser — servers", options);
 		if (choice === undefined) return;
@@ -1037,9 +1077,27 @@ async function showServerMenu(ctx: ExtensionCommandContext): Promise<void> {
 			await addServerWizard(ctx);
 			continue;
 		}
+		if (choice === MODEL_ROWS_OPTION) {
+			await toggleDedupMode(ctx);
+			continue;
+		}
 		const server = labelToServer.get(choice);
 		if (server) await showServerDetail(ctx, server);
 	}
+}
+
+/**
+ * Choose how models appear in /model: one row per server (so the serving
+ * machine is selectable) or one merged row per identical model that routes to
+ * the first online server.
+ */
+async function toggleDedupMode(ctx: ExtensionCommandContext): Promise<void> {
+	const choice = await ctx.ui.select(
+		`Model rows in /model — current: ${dedupModelsEnabled() ? "merged" : "one per server"}`,
+		[ROWS_PER_SERVER_OPTION, ROWS_MERGED_OPTION],
+	);
+	if (choice === undefined) return;
+	applyDedupMode(choice === ROWS_MERGED_OPTION, scopeFromCtx(ctx));
 }
 
 async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
@@ -1074,7 +1132,7 @@ async function addServerWizard(ctx: ExtensionCommandContext): Promise<void> {
 
 async function promptServerName(ctx: ExtensionCommandContext): Promise<string | undefined> {
 	for (;;) {
-		const raw = await ctx.ui.input("Server name (e.g. aginies.guibland.com)");
+		const raw = await ctx.ui.input("Server name (e.g. aginies.example.net)");
 		if (raw === undefined) return undefined;
 		const name = raw.trim();
 		const error = validateName(name);
@@ -1330,6 +1388,48 @@ function configClearContextOverride(rest: string[], scope: ConfigScope): void {
 	ui.notify(`Cleared context window override for "${rest[0]}".`, "info");
 }
 
+/** Human-readable name of a catalog mode, shared by the CLI and the menu. */
+function dedupModeLabel(dedup: boolean): string {
+	return dedup
+		? "merged — identical models share one /model row and route to the first online server"
+		: "per server — every server gets its own /model row, so the machine is selectable";
+}
+
+/** Switch catalog mode, republish /model, and tell the user what changed. */
+function applyDedupMode(dedup: boolean, scope: ConfigScope): void {
+	const ui = scope.ui;
+	if (dedupModelsEnabled() === dedup) {
+		ui.notify(`Model rows are already ${dedupModeLabel(dedup)}.`, "info");
+		return;
+	}
+	saveSettings({ ...readSettings(SETTINGS_PATH), dedupModels: dedup });
+	// Rebuild ids for the new mode; a live refresh keeps servers we have no cache for.
+	afterConfigChange({ ...scope, live: true });
+	ui.notify(`Model rows are now ${dedupModeLabel(dedup)}.`, "info");
+}
+
+function configDedup(rest: string[], scope: ConfigScope): void {
+	const ui = scope.ui;
+	const arg = (rest[0] ?? "").toLowerCase();
+	switch (arg) {
+		case "":
+		case "status":
+			ui.notify(`Model rows: ${dedupModeLabel(dedupModelsEnabled())}.`, "info");
+			return;
+		case "on":
+		case "true":
+			applyDedupMode(true, scope);
+			return;
+		case "off":
+		case "false":
+			applyDedupMode(false, scope);
+			return;
+		default:
+			ui.notify("Usage: /llama-chooser config dedup <on|off|status>", "info");
+			return;
+	}
+}
+
 // =============================================================================
 // Command handlers
 // =============================================================================
@@ -1365,6 +1465,9 @@ async function handleConfigCli(rest: string[], scope: ConfigScope): Promise<void
 			return;
 		case "clear-ctx":
 			configClearContextOverride(args, scope);
+			return;
+		case "dedup":
+			configDedup(args, scope);
 			return;
 		default:
 			ui.notify(CONFIG_USAGE, "info");
@@ -1447,6 +1550,7 @@ export default function (pi: ExtensionAPI) {
 				"refresh",
 				"set-ctx",
 				"clear-ctx",
+				"dedup",
 			];
 			if (prefix.startsWith("config ")) {
 				const rest = prefix.slice("config ".length);
@@ -1458,6 +1562,13 @@ export default function (pi: ExtensionAPI) {
 				}
 				const parts = rest.split(/\s+/);
 				const sub = parts[0]?.toLowerCase();
+				if (sub === "dedup") {
+					const modePrefix = parts[1] ?? "";
+					const matched = ["on", "off", "status"].filter((m) => m.startsWith(modePrefix));
+					return matched.length > 0
+						? matched.map((m) => ({ value: `config dedup ${m}`, label: m }))
+						: null;
+				}
 				const serverPrefix = parts[1] ?? "";
 				if (["edit", "remove", "enable", "disable", "set-ctx", "clear-ctx"].includes(sub)) {
 					const serverNames = loadServers().map((s) => s.name);

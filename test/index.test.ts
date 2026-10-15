@@ -487,7 +487,7 @@ describe("dedupConfigs", () => {
 	it("returns single config unchanged", async () => {
 		const { dedupConfigs } = await loadModule();
 		const configs = [makeConfig()];
-		const result = dedupConfigs(configs);
+		const result = dedupConfigs(configs, true);
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe("server1 / model");
 	});
@@ -498,7 +498,7 @@ describe("dedupConfigs", () => {
 			makeConfig({ id: "server1 / model", name: "server1 / model", baseUrl: "http://192.168.1.1:8080/v1" }),
 			makeConfig({ id: "server2 / model", name: "server2 / model", baseUrl: "http://192.168.1.2:8080/v1" }),
 		];
-		const result = dedupConfigs(configs);
+		const result = dedupConfigs(configs, true);
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe("model@server1|server2");
 		expect(result[0].name).toBe("model (server1, server2)");
@@ -512,8 +512,24 @@ describe("dedupConfigs", () => {
 			makeConfig({ id: "server1 / model1", name: "server1 / model1" }),
 			makeConfig({ id: "server1 / model2", name: "server1 / model2" }),
 		];
-		const result = dedupConfigs(configs);
+		const result = dedupConfigs(configs, true);
 		expect(result).toHaveLength(2);
+	});
+
+	it("keeps one entry per server when dedup is off", async () => {
+		const { dedupConfigs } = await loadModule();
+		const configs = [
+			makeConfig({ id: "server1 / model", name: "server1 / model", baseUrl: "http://192.168.1.1:8080/v1" }),
+			makeConfig({ id: "server2 / model", name: "server2 / model", baseUrl: "http://192.168.1.2:8080/v1" }),
+		];
+		const result = dedupConfigs(configs, false);
+		expect(result).toHaveLength(2);
+		expect(result.map((c) => c.id)).toEqual(["server1 / model", "server2 / model"]);
+		// Each entry keeps pointing at its own server.
+		expect(result.map((c) => c.baseUrl)).toEqual([
+			"http://192.168.1.1:8080/v1",
+			"http://192.168.1.2:8080/v1",
+		]);
 	});
 });
 
