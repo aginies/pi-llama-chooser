@@ -1,0 +1,21 @@
+{
+  "port": 8080,
+  "host": "127.0.0.1",
+  "default_model": "Qwen2.5-7B-Instruct",
+  "models": {
+    "Qwen2.5-7B-Instruct": {
+      "display_name": "Qwen2.5-7B-Instruct (Q6_K)",
+      "cmd": "node examples/llama-swap-fake-test/fake-upstream.mjs --port 9001",
+      "stop_cmd": "",
+      "preload": false,
+      "ttl": 300
+    },
+    "Llama-3.1-8B-Instruct": {
+      "display_name": "Llama-3.1-8B-Instruct (Q4_K_M)",
+      "cmd": "node examples/llama-swap-fake-test/fake-upstream.mjs --port 9002",
+      "stop_cmd": "",
+      "preload": false,
+      "ttl": 300
+    }
+  }
+}

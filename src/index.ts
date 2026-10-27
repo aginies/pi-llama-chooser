@@ -839,17 +839,16 @@ function displayOfRawModel(model: LlamaModel): string {
  * deduplicated form ("Qwen2.5 (Q6_K) (server1, server2)").
  *
  * The server separator is checked first: a one-row-per-server name can end in a
- * quantifier like "(Q6_K)" which also contains " (", so the dedup "(" rule must
- * not fire before we've ruled out the "server / ..." form.
+ * quantifier like "(Q6_K)" which also contains " (", so the dedup rule must not
+ * fire before we've ruled out the "server / ..." form.
  */
 function displayFromConfigName(configName: string): string {
 	// One-row-per-server format: "<server> / <display>".
 	const sep = configName.lastIndexOf(SERVER_SEP);
 	if (sep > 0) return configName.slice(sep + SERVER_SEP.length).trim();
-	// Deduplicated format: "<display> (<server1>, <server2>)".
-	const paren = configName.indexOf(" (");
-	if (paren > 0) return configName.slice(0, paren).trim();
-	return configName.trim();
+	// Deduplicated format: "<display> (<server1>, <server2>)". Strip only the
+	// trailing "(servers)" group, leaving any "(quant)" in the display intact.
+	return configName.replace(/\s*\([^()]*\)$/, "").trim();
 }
 
 /**
