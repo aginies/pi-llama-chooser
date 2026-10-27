@@ -332,13 +332,18 @@ export function formatFileSize(bytes: number): string {
 // Model configuration
 // =============================================================================
 
+/** Render a model as "<basename>" or "<basename> (<quant>)" — the display used by both the catalog name and the cached-model lookup. */
+function displayLabel(basename_: string, quant: string | null | undefined): string {
+	return quant ? `${basename_} (${quant})` : basename_;
+}
+
 export function toModelConfig(server: LlamaServer, model: LlamaModel): ProviderModelConfig {
 	const name = basename(model.id);
 	// meta.ftype from llama.cpp, or extract from model ID as fallback (Gufo).
 	const quant = model.meta?.ftype ?? extractQuant(model.id);
 	// Gufo puts context_length at top level; llama.cpp puts n_ctx inside meta.
 	const ctxSize = model.context_length ?? model.meta?.n_ctx;
-	const displayName = quant ? `${name} (${quant})` : name;
+	const displayName = displayLabel(name, quant);
 	const ctxOverride =
 		server.contextOverride !== undefined && server.contextOverride > 0
 			? server.contextOverride
@@ -638,7 +643,7 @@ function warnIfModelLost(options: ConfigChangeOptions, previousIds: string[]): v
  * no servers are enabled at all: that means the catalog should be empty, so
  * the cache is cleared and the persisted entry dropped.
  */
-async function refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
+export async function refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
 	const enabled = loadServers().filter((s) => s.enabled);
 	// `publish` is part of Pi's refresh contract; guard for test contexts that
 	// omit it.
@@ -820,11 +825,56 @@ export async function pingServer(server: LlamaServer, force = false): Promise<bo
 }
 
 /**
+ * Display label for a raw model listing entry, built the same way as the
+ * catalog name so the two can be matched exactly.
+ */
+function displayOfRawModel(model: LlamaModel): string {
+	const quant = model.meta?.ftype ?? extractQuant(model.id);
+	return displayLabel(basename(model.id), quant);
+}
+
+/**
+ * Extract the model display label from a catalog config's `name`.
+ * Handles both the one-row-per-server form ("server / Qwen2.5 (Q6_K)") and the
+ * deduplicated form ("Qwen2.5 (Q6_K) (server1, server2)").
+ *
+ * The server separator is checked first: a one-row-per-server name can end in a
+ * quantifier like "(Q6_K)" which also contains " (", so the dedup "(" rule must
+ * not fire before we've ruled out the "server / ..." form.
+ */
+function displayFromConfigName(configName: string): string {
+	// One-row-per-server format: "<server> / <display>".
+	const sep = configName.lastIndexOf(SERVER_SEP);
+	if (sep > 0) return configName.slice(sep + SERVER_SEP.length).trim();
+	// Deduplicated format: "<display> (<server1>, <server2>)".
+	const paren = configName.indexOf(" (");
+	if (paren > 0) return configName.slice(0, paren).trim();
+	return configName.trim();
+}
+
+/**
+ * Resolve the real upstream model id for a catalog entry, from that server's
+ * cached model listing. Servers that validate the `model` field (e.g. llama-swap
+ * routers, OpenAI-compatible gateways) require the exact id they expose on
+ * `/v1/models`; the catalog `id` is only a display label, so we look the real
+ * one up here and forward it as the wire `model`.
+ * Returns undefined (leaving the display id untouched) when the cache is empty
+ * or nothing matches, so behaviour degrades to the previous one.
+ */
+function upstreamModelIdFor(server: LlamaServer, configName: string): string | undefined {
+	const cached = modelCache.get(getServerUrl(server));
+	if (!cached) return undefined;
+	const target = displayFromConfigName(configName);
+	const match = cached.models.find((m) => displayOfRawModel(m) === target);
+	return match?.id;
+}
+
+/**
  * Provider config shared by the initial registration and every catalog
  * republish. `models` publishes a catalog immediately instead of waiting for
  * Pi's next refresh.
  */
-function llamaProviderConfig(models?: ProviderModelConfig[]): ProviderConfig {
+export function llamaProviderConfig(models?: ProviderModelConfig[]): ProviderConfig {
 	return {
 		name: "Llama Chooser",
 		api: "openai-completions",
@@ -837,6 +887,12 @@ function llamaProviderConfig(models?: ProviderModelConfig[]): ProviderConfig {
 			// server only; override it so deduplicated models are routed to
 			// the (first online) server selected for this id.
 			const routed = server ? { ...model, baseUrl: getInferenceUrl(server) } : model;
+			// Forward the real upstream model id (e.g. a llama-swap router key) as
+			// the `model` field. The catalog id is a display label that servers
+			// which validate it would reject, so resolve the exact id from the
+			// cached model listing before streaming.
+			const upstream = server ? upstreamModelIdFor(server, model.name) : undefined;
+			if (upstream) routed.id = upstream;
 			const key = server?.apiKey?.trim();
 			return compatStreamSimple(routed, context, { ...options, apiKey: key || "local" });
 		},

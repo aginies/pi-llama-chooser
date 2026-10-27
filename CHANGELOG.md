@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-10-27
+
+### Fixed
+
+- **Real upstream model id forwarded on every request** — servers that validate the `model` field (`llama-swap` routers, OpenAI-compatible gateways) rejected chooser requests because the catalog `id` is a display label like `Qwen2.5-7B-Instruct (Q6_K)`. The stream path now resolves the exact id that the server exposes on `/v1/models` from its cached listing and sends that as the wire `model`. When the cache is empty or nothing matches, the previous id is kept unchanged.
+- **Consistent display labels** — the catalog name and the cached-listing lookup are built by a single `displayLabel` helper, so the two can no longer drift apart and fail to match.
+
+### Added
+
+- **`examples/llama-swap-fake-test/`** — a GPU-free harness (fake llama.cpp upstream + `llama-swap` profiles) to exercise the whole selection → routing → streaming path locally, including the router id resolution above.
+- **`llamaProviderConfig` is exported** — the provider config (including the upstream id forwarding) is now reusable by tests and downstream extensions.
+
+[0.7.0]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.7.0
+
+## [0.6.1] — 2026-10-15
+
+### Fixed
+
+- **`pi --list-models` shows llama-chooser models** — the catalog is persisted via `context.publish` on live refreshes, so one-shot processes have something to read; offline refreshes fall back to the persisted catalog (`context.stored`).
+- **Offline servers no longer list models** — catalog entries whose servers are all unreachable are dropped (parallel ping), and the persisted entry is cleared when no server is enabled.
+- **Stale in-memory catalog on cache reset** — `resetCaches()` now also clears the in-memory catalog.
+
+[0.6.1]: https://github.com/aginies/pi-llama-chooser/releases/tag/v0.6.1
+
 ## [0.6.0] — 2026-10-15
 
 ### Changed
