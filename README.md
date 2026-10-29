@@ -81,6 +81,24 @@ Rates are color-coded (red → orange → yellow → lime → cyan → violet) a
 
 ## Configuration
 
+### Prefill Configuration
+
+The prefill bar is provided by the [`pi-prefill`](https://pi.dev/packages/pi-prefill) package. Install it alongside this extension:
+
+```bash
+pi install npm:pi-prefill
+```
+
+To enable prefill measurement, add a `prefill` key to `~/.pi/agent/settings.json` listing the providers you want measured. It controls which parts the bar shows, in what order, and which providers are asked for:
+
+```json
+{
+  "prefill": {
+    "providers": ["llama.cpp", "llama-chooser"]
+  }
+}
+```
+
 Servers are stored in `~/.pi/agent/llama-chooser-servers.json`.
 Preferences are stored next to it in `~/.pi/agent/llama-chooser-servers-settings.json`.
 Set the `LLAMA_CHOOSER_STORAGE` environment variable to use a different path.
